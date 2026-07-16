@@ -1,0 +1,66 @@
+# mcpterminal 配置文件 — MCP 远程终端 / Agent 执行基础设施
+
+app:
+  name: mcpterminal
+  theme: dark  # dark | light
+
+servers:
+  # ---- 示例配置 ----
+  demo-server:
+    host: 100.64.0.13
+    port: 22
+    user: fuzihan
+    # key_path: ~/.ssh/id_rsa   # SSH 私钥（与 password 二选一）
+    password: password   # 密码（不推荐明文存储）
+
+ai:
+  provider: claude  # claude | codex | custom
+  model: claude-sonnet-4-20250514
+  # api_key: 从环境变量读取
+
+mcp:
+  port: 5000
+
+security:
+  # ---- 需要确认的危险命令 ----
+  dangerous_commands:
+    - rm
+    - shutdown
+    - reboot
+    - iptables
+    - mkfs
+    - fdisk
+    - dd
+    - chmod 777
+    - systemctl stop
+    - systemctl disable
+
+  # ---- 风险等级分类 ----
+  risk_levels:
+    low:
+      - ls
+      - cat
+      - df
+      - ps
+      - status
+      - show
+      - list
+    medium:
+      - systemctl restart
+      - systemctl reload
+      - apt install
+      - pip install
+      - docker restart
+    high:
+      - rm
+      - shutdown
+      - reboot
+      - iptables
+      - mkfs
+      - fdisk
+      - dd
+
+logging:
+  path: ./logs
+  level: INFO
+

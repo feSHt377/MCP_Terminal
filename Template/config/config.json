@@ -1,0 +1,41 @@
+{
+  "api_keys": {
+    "openai": ""
+  },
+  "models": {
+    "local": {
+      "disable": false,
+      "api_url": "http://100.64.0.13:11438",
+      "default_model": "qwen3.6:27b"
+    },
+    "local2": {
+      "disable": true,
+      "api_url": "http://127.0.0.1:11434",
+      "default_model": "qwen3.5:2b"
+    }
+  },
+  "logging": {
+    "log_dir": "logs",
+    "enable_console": true
+  },
+  "test_cases": {
+    "basic_tests": [
+      {
+        "test_case": "简单问候",
+        "prompt": "你好，请使用弹窗简单介绍一下自己。",
+        "params": {
+          "temperature": 0.7,
+          "max_tokens": 1024
+        }
+      },
+      {
+        "test_case": "数学计算",
+        "prompt": "请计算 78 * 56 的结果。使用弹窗弹出",
+        "params": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        }
+      }
+    ]
+  }
+}
