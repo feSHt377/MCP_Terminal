@@ -1,7 +1,7 @@
 """SSH 连接与命令执行集成测试。
 
 用法：
-    .venv\Scripts\activate
+    .venv\\Scripts\\activate
     python tests/test_ssh_live.py
 """
 
