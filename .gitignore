@@ -3,6 +3,7 @@
 
 # 日志文件
 *.txt
+logs/
 
 # Python
 __pycache__/
