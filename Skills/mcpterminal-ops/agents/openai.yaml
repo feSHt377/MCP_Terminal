@@ -1,0 +1,10 @@
+interface:
+  display_name: "MCP Terminal Ops"
+  short_description: "Operate remote servers safely through mcpterminal"
+  default_prompt: "Use $mcpterminal-ops to inspect and operate the current remote server safely."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mcpterminal"
+      description: "Local mcpterminal server for shared GUI and SSH session operations"

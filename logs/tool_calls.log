@@ -1,0 +1,66 @@
+2026-07-17 09:37:03,427 - INFO - list_servers({}) → success
+2026-07-17 09:37:04,494 - INFO - list_sessions({}) → success
+2026-07-17 09:37:57,328 - INFO - autocomplete_command({"command": "ssh fuzihan@100.64.0.13"}) → error
+2026-07-17 09:38:17,117 - INFO - autocomplete_command({"command": "ssh fuzihan@100.64.0.13"}) → success
+2026-07-17 09:38:46,621 - INFO - proxy_command({"command": "nvidia-smi"}) → success
+2026-07-17 09:46:30,726 - INFO - autocomplete_command({"command": "df -h"}) → success
+2026-07-17 09:47:06,302 - INFO - proxy_command({"command": "clear"}) → success
+2026-07-17 09:47:09,473 - INFO - proxy_command({"command": "printf '\\033[2J\\033[H'"}) → success
+2026-07-17 09:50:12,846 - INFO - list_sessions({}) → success
+2026-07-17 09:51:11,100 - INFO - list_sessions({}) → success
+2026-07-17 09:51:38,120 - INFO - list_sessions({}) → success
+2026-07-17 09:54:58,314 - INFO - list_servers({}) → success
+2026-07-17 09:54:58,316 - INFO - list_sessions({}) → success
+2026-07-17 09:54:58,319 - INFO - get_dangerous_commands({}) → success
+2026-07-17 09:54:58,326 - INFO - ssh_exec({"session_id": "no@x:22", "command": "ls"}) → error
+2026-07-17 09:54:58,327 - INFO - terminal_write({"session_id": "no@x:22"}) → error
+2026-07-17 09:54:58,329 - INFO - terminal_read({"session_id": "no@x:22"}) → error
+2026-07-17 09:54:58,330 - INFO - upload_file({"session_id": "no@x:22", "local": "/a", "remote": "/b"}) → error
+2026-07-17 09:54:58,331 - INFO - download_file({"session_id": "no@x:22", "remote": "/a", "local": "/b"}) → error
+2026-07-17 09:54:58,332 - INFO - ssh_disconnect({"session_id": "no@x:22"}) → error
+2026-07-17 09:58:18,548 - INFO - list_servers({}) → success
+2026-07-17 09:58:18,549 - INFO - list_sessions({}) → success
+2026-07-17 09:58:18,552 - INFO - get_dangerous_commands({}) → success
+2026-07-17 09:58:18,559 - INFO - ssh_exec({"session_id": "no@x:22", "command": "ls"}) → error
+2026-07-17 09:58:18,560 - INFO - terminal_write({"session_id": "no@x:22"}) → error
+2026-07-17 09:58:18,561 - INFO - terminal_read({"session_id": "no@x:22"}) → error
+2026-07-17 09:58:18,562 - INFO - upload_file({"session_id": "no@x:22", "local": "/a", "remote": "/b"}) → error
+2026-07-17 09:58:18,564 - INFO - download_file({"session_id": "no@x:22", "remote": "/a", "local": "/b"}) → error
+2026-07-17 09:58:18,565 - INFO - ssh_disconnect({"session_id": "no@x:22"}) → error
+2026-07-17 10:12:32,102 - INFO - list_sessions({}) → success
+2026-07-17 10:12:36,232 - INFO - proxy_command({"command": "which lxc && lxc version"}) → success
+2026-07-17 10:12:55,024 - INFO - proxy_command({"command": "lxc image list images: | tail -20"}) → error
+2026-07-17 10:13:02,302 - INFO - proxy_command({"command": "lxc launch images:ubuntu/noble my-container"}) → success
+2026-07-17 10:13:12,691 - INFO - proxy_command({"command": "lxc image list images: ubuntu 2>&1 | head -5"}) → success
+2026-07-17 10:13:23,067 - INFO - proxy_command({"command": "lxc image list images: ubuntu container 2>&1 | head -10"}) → success
+2026-07-17 10:13:33,832 - INFO - proxy_command({"command": "lxc image list images: ubuntu/25.10 2>&1"}) → success
+2026-07-17 10:14:10,698 - INFO - proxy_command({"command": "lxc image list images: 2>&1 | head -20"}) → success
+2026-07-17 10:14:15,449 - INFO - proxy_command({"command": "lxc image list"}) → error
+2026-07-17 10:14:15,619 - INFO - proxy_command({"command": "lxc remote list"}) → success
+2026-07-17 10:14:24,223 - INFO - proxy_command({"command": "lxc image list tuna-images: 2>&1 | head -20"}) → success
+2026-07-17 10:34:33,729 - INFO - proxy_command({"command": "lxc image list"}) → success
+2026-07-17 10:35:08,022 - INFO - proxy_command({"command": "lxc launch ub24-n58015903 testcontainer"}) → error
+2026-07-17 10:35:14,493 - INFO - proxy_command({"command": "lxc list testcontainer 2>&1"}) → success
+2026-07-17 10:35:17,159 - INFO - proxy_command({"command": "lxc start testcontainer"}) → success
+2026-07-17 10:35:19,952 - INFO - proxy_command({"command": "lxc info --show-log testcontainer 2>&1 | tail -10"}) → success
+2026-07-17 10:35:22,612 - INFO - proxy_command({"command": "lxc start testcontainer"}) → success
+2026-07-17 10:35:25,310 - INFO - proxy_command({"command": "lxc operation list 2>&1"}) → success
+2026-07-17 10:35:34,225 - INFO - proxy_command({"command": "sleep 5 && lxc list testcontainer 2>&1 | tail -5"}) → success
+2026-07-17 10:35:37,831 - INFO - proxy_command({"command": "lxc operation list 2>&1"}) → success
+2026-07-17 10:36:27,461 - INFO - proxy_command({"command": "lxc operation cancel 019f6ded-0860-761a-ac01-09ee7a8d1d80"}) → error
+2026-07-17 10:36:36,070 - INFO - proxy_command({"command": "lxc operation cancel 019f6ded-0860-761a-ac01-09ee7a8d1d80"}) → success
+2026-07-17 10:36:38,964 - INFO - proxy_command({"command": "lxc operation list 2>&1 && echo \"---\" && lxc list testcontainer 2>&1"}) → success
+2026-07-17 10:36:42,169 - INFO - proxy_command({"command": "lxc cluster list 2>&1"}) → success
+2026-07-17 10:36:47,974 - INFO - proxy_command({"command": "sleep 3 && lxc operation list 2>&1 | tail -3"}) → success
+2026-07-17 10:36:55,658 - INFO - proxy_command({"command": "sleep 5 && lxc operation list 2>&1 | tail -2"}) → success
+2026-07-17 10:36:58,401 - INFO - proxy_command({"command": "lxc delete testcontainer --force 2>&1"}) → success
+2026-07-17 10:37:08,736 - INFO - proxy_command({"command": "sleep 8 && lxc operation list 2>&1"}) → success
+2026-07-17 10:37:12,820 - INFO - proxy_command({"command": "lxc operation delete 019f6ded-0860-761a-ac01-09ee7a8d1d80 2>&1"}) → success
+2026-07-17 10:44:02,561 - INFO - proxy_command({"command": "lxc image list"}) → success
+2026-07-17 10:44:08,940 - INFO - proxy_command({"command": "lxc operation list 2>&1"}) → success
+2026-07-17 10:44:26,872 - INFO - proxy_command({"command": "sleep 10 && lxc operation list 2>&1"}) → success
+2026-07-17 10:44:50,027 - INFO - proxy_command({"command": "lxc launch ub24-n58015903 testcontainer -c location=4090"}) → success
+2026-07-17 10:44:55,943 - INFO - proxy_command({"command": "lxc delete testcontainer 2>&1"}) → success
+2026-07-17 10:46:10,925 - INFO - proxy_command({"command": "lxc launch ub24-n58015903 testcontainer2 --target 4090"}) → success
+2026-07-17 10:46:17,608 - INFO - proxy_command({"command": "lxc list testcontainer2 2>&1"}) → success
+2026-07-17 10:47:05,455 - INFO - autocomplete_command({"command": "lxc config device add testcontainer2 port90 proxy --listen=tcp:0.0.0.0:48888 --connect=tcp:127.0.0.1:90 --target 4090"}) → success

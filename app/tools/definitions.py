@@ -7,6 +7,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from app.config.manager import add_server as _add_server, get_servers, get_security_config, remove_server as _remove_server
+from app.ipc import call_gui, gui_is_running
 from app.ssh.manager import SSHManager
 
 # ------------------------------------------------------------------
@@ -33,7 +37,9 @@ HISTORY_FILE = os.path.join(LOG_DIR, "tool_call_history.json")
 def _setup_logger() -> logging.Logger:
     """配置文件日志，只写文件不输出到控制台。"""
     logger = logging.getLogger("mcpterminal.tools")
-    logger.handlers.clear()
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
     logger.setLevel(logging.INFO)
     os.makedirs(LOG_DIR, exist_ok=True)
     fh = logging.FileHandler(
@@ -72,6 +78,61 @@ def _log_call(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> N
         json.dump(history, f, ensure_ascii=False, indent=2)
     tool_logger.info("%s(%s) → %s", tool_name, json.dumps(args, ensure_ascii=False), result.get("status"))
 
+# ------------------------------------------------------------------
+# GUI 启动辅助
+# ------------------------------------------------------------------
+
+@mcp.tool()
+def launch_gui() -> dict[str, Any]:
+    """启动或激活共享 SSH 会话的人工终端 GUI。
+
+    GUI 是 SSH 会话的唯一所有者。后续 MCP SSH 工具通过本地 IPC 操作该会话，
+    因而人类输入和 Agent 操作会出现在同一个终端中。
+    """
+    if gui_is_running():
+        call_gui("activate", timeout=1.0)
+        return {"status": "success", "message": "GUI 已在运行", "already_running": True}
+
+    project_root = Path(__file__).resolve().parents[2]
+    executable = Path(sys.executable)
+    popen_kwargs: dict[str, Any] = {
+        "cwd": project_root,
+        # GUI 不得继承 MCP stdio，否则关闭 GUI/控制台可能连带断开 Agent。
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        pythonw = executable.with_name("pythonw.exe")
+        if pythonw.exists():
+            executable = pythonw
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        command = [str(executable), "-m", "app.main"]
+    else:
+        popen_kwargs["start_new_session"] = True
+        command = [str(executable), "-m", "app.main"]
+
+    process = subprocess.Popen(
+        command,
+        **popen_kwargs,
+    )
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return {"status": "error", "message": "GUI 启动失败", "exit_code": process.returncode}
+        if gui_is_running():
+            return {"status": "success", "pid": process.pid, "message": "GUI 已启动"}
+        time.sleep(0.1)
+    process.terminate()
+    return {"status": "error", "pid": process.pid, "message": "GUI 启动超时"}
+
+
+async def _call_gui_async(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """在线程中执行阻塞 IPC，避免阻塞 MCP 的 asyncio 循环。"""
+    import asyncio
+
+    return await asyncio.to_thread(call_gui, method, params)
+
 
 # ------------------------------------------------------------------
 # 工具: SSH 连接
@@ -96,11 +157,10 @@ async def ssh_connect(
         password: SSH 密码（与 key_path 二选一）。
         key_path: SSH 私钥路径（与 password 二选一）。
     """
-    manager = SSHManager()
-    result = await manager.connect(
-        host=host, user=user, port=port,
-        password=password, key_path=key_path,
-    )
+    result = await _call_gui_async("ssh_connect", {
+        "host": host, "user": user, "port": port,
+        "password": password, "key_path": key_path,
+    })
     _log_call("ssh_connect", {"host": host, "user": user, "port": port}, result)
     return result
 
@@ -112,8 +172,7 @@ async def ssh_disconnect(session_id: str) -> dict[str, Any]:
     Args:
         session_id: 要断开的会话 ID（格式: user@host:port）。
     """
-    manager = SSHManager()
-    result = await manager.disconnect(session_id)
+    result = await _call_gui_async("ssh_disconnect", {"session_id": session_id})
     _log_call("ssh_disconnect", {"session_id": session_id}, result)
     return result
 
@@ -128,8 +187,10 @@ async def ssh_exec(
     command: str,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """在远程服务器上执行一条命令（非交互式），返回 stdout/stderr 和退出码。
+    """在 GUI 当前 SSH 会话执行一条命令，返回 stdout/stderr 和退出码。
 
+    一次只提交一条命令，等待并分析本次结果后再决定下一步；不要并行提交多个
+    探测命令，也不要在未读取错误信息前用猜测的参数反复重试。
     适合执行一次性命令，如 nvidia-smi、docker ps、ls 等。
     如需交互式终端，请使用 terminal_write / terminal_read。
 
@@ -138,8 +199,9 @@ async def ssh_exec(
         command: 要执行的 shell 命令。
         timeout: 命令超时秒数，默认 30。
     """
-    manager = SSHManager()
-    result = await manager.exec_command(session_id, command, timeout=timeout)
+    result = await _call_gui_async("ssh_exec", {
+        "session_id": session_id, "command": command, "timeout": timeout,
+    })
     _log_call("ssh_exec", {"session_id": session_id, "command": command}, result)
     return result
 
@@ -158,8 +220,7 @@ async def terminal_write(session_id: str, data: str) -> dict[str, Any]:
         session_id: SSH 会话 ID。
         data: 要写入的文本（如果是命令，末尾需加 \\n）。
     """
-    manager = SSHManager()
-    result = await manager.terminal_write(session_id, data)
+    result = await _call_gui_async("terminal_write", {"session_id": session_id, "data": data})
     _log_call("terminal_write", {"session_id": session_id}, result)
     return result
 
@@ -177,8 +238,9 @@ async def terminal_read(
         size: 最大读取字节数，默认 4096。
         timeout: 等待输出的超时秒数，默认 2。
     """
-    manager = SSHManager()
-    result = await manager.terminal_read(session_id, size=size, timeout=timeout)
+    result = await _call_gui_async("terminal_read", {
+        "session_id": session_id, "size": size, "timeout": timeout,
+    })
     _log_call("terminal_read", {"session_id": session_id}, result)
     return result
 
@@ -200,8 +262,9 @@ async def upload_file(
         local_path: 本地文件的完整路径。
         remote_path: 远程目标路径。
     """
-    manager = SSHManager()
-    result = await manager.upload_file(session_id, local_path, remote_path)
+    result = await _call_gui_async("upload_file", {
+        "session_id": session_id, "local_path": local_path, "remote_path": remote_path,
+    })
     _log_call("upload_file", {"session_id": session_id, "local": local_path, "remote": remote_path}, result)
     return result
 
@@ -219,8 +282,9 @@ async def download_file(
         remote_path: 远程文件的完整路径。
         local_path: 本地目标路径。
     """
-    manager = SSHManager()
-    result = await manager.download_file(session_id, remote_path, local_path)
+    result = await _call_gui_async("download_file", {
+        "session_id": session_id, "remote_path": remote_path, "local_path": local_path,
+    })
     _log_call("download_file", {"session_id": session_id, "remote": remote_path, "local": local_path}, result)
     return result
 
@@ -248,9 +312,38 @@ def list_servers() -> dict[str, Any]:
 @mcp.tool()
 def list_sessions() -> dict[str, Any]:
     """列出所有活跃的 SSH 会话及其状态。"""
-    manager = SSHManager()
-    result = manager.list_sessions()
+    result = call_gui("list_sessions")
+    if result.get("status") == "error" and "GUI 未运行" in result.get("message", ""):
+        result = SSHManager().list_sessions()
     _log_call("list_sessions", {}, result)
+    return result
+
+
+@mcp.tool()
+async def proxy_command(command: str, timeout: float = 30.0) -> dict[str, Any]:
+    """在 GUI 当前会话代理执行一条命令，并把过程显示在人工终端。
+
+    必须等待本次结果并根据 stdout/stderr 决定下一步。不要并行调用本工具，也不要
+    在尚未分析错误原因时连续尝试多个相似命令。并发到达的少量命令会被串行排队。
+    """
+    result = await _call_gui_async("proxy_command", {"command": command, "timeout": timeout})
+    _log_call("proxy_command", {"command": command}, result)
+    return result
+
+
+@mcp.tool()
+async def autocomplete_command(command: str) -> dict[str, Any]:
+    """将命令补全到 GUI 输入框但不执行，交由用户检查、修改或回车确认。"""
+    result = await _call_gui_async("autocomplete_command", {"command": command})
+    _log_call("autocomplete_command", {"command": command}, result)
+    return result
+
+
+@mcp.tool()
+async def select_session(session_id: str) -> dict[str, Any]:
+    """将 GUI 当前终端切换到一个已连接的 SSH 会话，不关闭其他会话。"""
+    result = await _call_gui_async("select_session", {"session_id": session_id})
+    _log_call("select_session", {"session_id": session_id}, result)
     return result
 
 

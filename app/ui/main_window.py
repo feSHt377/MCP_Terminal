@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config.manager import get_servers
+from app.ipc import GuiIPCServer, IPCRequest
 from app.ssh.bridge import SSHBridge
 from app.ssh.manager import SSHManager
 from app.ui.server_panel import ServerPanel
@@ -26,7 +27,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 500)
 
         self._session_id: str | None = None
-        self._cmd_count: int = 0
 
         self._setup_ui()
         self._setup_menu()
@@ -35,6 +35,11 @@ class MainWindow(QMainWindow):
         # 启动持久化 SSH 事件循环
         self._bridge = SSHBridge()
         self._bridge.start()
+
+        # GUI 持有唯一 SSH 会话；MCP Server 通过本地 IPC 共同操作它。
+        self._ipc = GuiIPCServer(self)
+        self._ipc.request_received.connect(self._on_ipc_request)
+        self._ipc.start()
 
     # ------------------------------------------------------------------
     # UI 搭建
@@ -92,6 +97,11 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        tools_menu = menu.addMenu("工具")
+        chat_action = QAction("🤖 Agent Chat（MCP 工具链测试）", self)
+        chat_action.triggered.connect(self._open_chat)
+        tools_menu.addAction(chat_action)
+
     # ------------------------------------------------------------------
     # 服务器列表
     # ------------------------------------------------------------------
@@ -137,6 +147,10 @@ class MainWindow(QMainWindow):
             )
             self.status_panel.log_connect(self._session_id, host)
             self.status_bar.showMessage(f"已连接: {self._session_id}")
+
+            # 同步会话到已打开的 Chat 测试窗口
+            if hasattr(self, "_chat_window") and self._chat_window is not None:
+                self._chat_window.set_session(self._session_id)
 
             # 展示系统欢迎信息
             self._show_welcome(user, host)
@@ -198,20 +212,185 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(result.get("message", "已断开"))
 
     # ------------------------------------------------------------------
+    # Agent Chat 窗口（MCP 工具链开发测试用）
+    # ------------------------------------------------------------------
+
+    def _open_chat(self):
+        """打开 MCP 工具链测试窗口。"""
+        from app.ui.chat_window import ChatWindow
+
+        chat = ChatWindow(
+            session_id=self._session_id,
+            bridge=self._bridge,
+            parent=self,
+        )
+        # 代理：Agent 命令注入主终端并执行
+        chat.proxy_command_requested.connect(self._on_agent_proxy)
+        # 补全：Agent 命令填入主终端输入框
+        chat.autocomplete_requested.connect(self._on_agent_autocomplete)
+
+        self._chat_window = chat
+        chat.show()
+
+    def _on_agent_proxy(self, cmd: str):
+        """Agent 代理执行：注入主终端 SSH 输入框并自动执行。"""
+        if not self._session_id:
+            self.status_panel.log_error("代理失败：未连接")
+            return
+        self.status_panel.log_tool_call("agent:proxy", "exec")
+        self.terminal.append_line(f"\n-- Agent 代理执行 --\n", "#4fc1ff")
+        self.terminal.execute_command(cmd)
+
+    def _on_agent_autocomplete(self, cmd: str):
+        self.status_panel.log_tool_call("agent:autocomplete", "ok")
+        self.terminal.set_input_text(cmd)
+
+    # ------------------------------------------------------------------
+    # MCP / GUI 共享会话 IPC
+    # ------------------------------------------------------------------
+
+    def _on_ipc_request(self, request: IPCRequest):
+        method = request.method
+        params = request.params
+
+        if method == "ping":
+            request.finish({"status": "success", "session_id": self._session_id})
+            return
+        if method == "activate":
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            request.finish({"status": "success", "session_id": self._session_id})
+            return
+        if method == "list_sessions":
+            request.finish(SSHManager().list_sessions())
+            return
+        if method == "select_session":
+            self._select_session(request, str(params.get("session_id", "")))
+            return
+        if method == "autocomplete_command":
+            command = str(params.get("command", ""))
+            self._on_agent_autocomplete(command)
+            request.finish({"status": "success", "command": command, "executed": False})
+            return
+
+        if method == "ssh_connect":
+            host = str(params.get("host", ""))
+            user = str(params.get("user", "root"))
+            port = int(params.get("port", 22))
+            manager = SSHManager()
+
+            async def _connect():
+                return await manager.connect(
+                    host=host, user=user, port=port,
+                    password=params.get("password"), key_path=params.get("key_path"),
+                )
+
+            self._bridge.submit_async(
+                _connect(),
+                lambda result: self._finish_ipc_connect(request, result, user, host),
+            )
+            return
+
+        requested_sid = params.get("session_id")
+        if method == "ssh_disconnect":
+            sid_to_close = str(requested_sid or self._session_id or "")
+            if not sid_to_close:
+                request.finish({"status": "error", "message": "没有可断开的 SSH 会话"})
+                return
+            manager = SSHManager()
+            self._bridge.submit_async(
+                manager.disconnect(sid_to_close),
+                lambda result: self._finish_ipc_disconnect(
+                    request, result, sid_to_close, sid_to_close == self._session_id
+                ),
+            )
+            return
+
+        sid = self._session_id
+        if not sid:
+            request.finish({"status": "error", "message": "GUI 当前没有 SSH 会话"})
+            return
+        if requested_sid and requested_sid != sid:
+            request.finish({
+                "status": "error",
+                "message": f"请求会话 {requested_sid} 不是 GUI 当前会话 {sid}",
+            })
+            return
+
+        if method in ("ssh_exec", "proxy_command"):
+            command = str(params.get("command", ""))
+            tool_label = f"agent:{command[:30]}"
+
+            def _finish_agent_command(result):
+                self.status_panel.log_tool_call(tool_label, result.get("status", "error"))
+                request.finish(result)
+
+            dispatch = self.terminal.execute_command(
+                command,
+                on_done=_finish_agent_command,
+                source="Agent",
+                timeout=float(params.get("timeout", 30.0)),
+            )
+            self.status_panel.log_tool_call(tool_label, dispatch.get("status", "error"))
+            return
+
+        manager = SSHManager()
+        if method == "terminal_write":
+            coro = manager.terminal_write(sid, str(params.get("data", "")))
+            callback = request.finish
+        elif method == "terminal_read":
+            coro = manager.terminal_read(
+                sid, size=int(params.get("size", 4096)), timeout=float(params.get("timeout", 2.0)),
+            )
+            callback = request.finish
+        elif method == "upload_file":
+            coro = manager.upload_file(sid, params["local_path"], params["remote_path"])
+            callback = request.finish
+        elif method == "download_file":
+            coro = manager.download_file(sid, params["remote_path"], params["local_path"])
+            callback = request.finish
+        else:
+            request.finish({"status": "error", "message": f"未知 GUI IPC 方法: {method}"})
+            return
+        self._bridge.submit_async(coro, callback)
+
+    def _finish_ipc_connect(self, request, result, user, host):
+        self._on_connected(result, user, host)
+        request.finish(result)
+
+    def _finish_ipc_disconnect(self, request, result, sid, was_current=True):
+        if was_current:
+            self._on_disconnected(result, sid)
+        elif result.get("status") == "success":
+            self.status_panel.log_disconnect(sid)
+        request.finish(result)
+
+    def _select_session(self, request, session_id: str):
+        sessions = SSHManager().list_sessions().get("sessions", {})
+        info = sessions.get(session_id)
+        if info is None or not info.get("connected"):
+            request.finish({"status": "error", "message": f"SSH 会话不存在或未连接: {session_id}"})
+            return
+        self._session_id = session_id
+        self.terminal.set_session(session_id, info.get("user", ""), info.get("host", ""))
+        self.server_panel.set_connected(session_id, session_id)
+        self.status_bar.showMessage(f"当前会话: {session_id}")
+        if hasattr(self, "_chat_window") and self._chat_window is not None:
+            self._chat_window.set_session(session_id)
+        request.finish({"status": "success", "session_id": session_id, "message": "已切换当前会话"})
+
+    # ------------------------------------------------------------------
     # 关闭
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
-        if self._session_id:
+        if SSHManager().list_sessions().get("count", 0):
             manager = SSHManager()
-            sid = self._session_id
 
-            async def _disconnect():
-                return await manager.disconnect(sid)
+            # GUI 退出时统一关闭其拥有的全部 SSH 会话。
+            self._bridge.submit(manager.disconnect_all())
 
-            # 同步等待断开（closeEvent 必须是同步的）
-            self._bridge.submit(_disconnect)
-            self.status_panel.log_disconnect(sid)
-
+        self._ipc.stop()
         self._bridge.stop()
         super().closeEvent(event)

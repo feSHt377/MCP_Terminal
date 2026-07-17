@@ -3,7 +3,9 @@
 人工通过此组件直接操作远程服务器，不经过 MCP 协议。
 """  # noqa: D205
 
-from PySide6.QtCore import Qt, Signal
+from collections import deque
+
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QColor, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
@@ -22,12 +24,17 @@ class TerminalWidget(QWidget):
     """
 
     command_executed = Signal(str, object)  # (command, result_dict)
+    MAX_AGENT_QUEUE = 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._session_id: str | None = None
         self._history: list[str] = []
         self._history_index: int = -1
+        self._busy = False
+        self._result_callback = None
+        self._active_command = ""
+        self._pending_commands = deque()
         self._setup_ui()
 
     def _setup_ui(self):
@@ -111,6 +118,17 @@ class TerminalWidget(QWidget):
         """向输出区追加一行（供外部调用）。"""
         self._append_output(text, color)
 
+    def execute_command(
+        self, cmd: str, on_done=None, source: str = "Agent", timeout: float = 30.0
+    ):
+        """代理：将命令注入输入框并立即执行。Agent 通过此方法操作用户的主终端。"""
+        return self._execute(cmd, on_done=on_done, source=source, timeout=timeout)
+
+    def set_input_text(self, text: str):
+        """补全：将命令填入输入框但不执行。用户可修改后手动 Enter。"""
+        self.input.setText(text)
+        self.input.setFocus()
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
@@ -120,19 +138,55 @@ class TerminalWidget(QWidget):
         if not text.strip():
             return
 
+        self._execute(text, source="Human")
+
+    def _execute(
+        self, text: str, on_done=None, source: str = "Human", timeout: float = 30.0
+    ):
         sid = self._session_id
         if not sid:
             self._append_output("⚠ 未连接到任何服务器\n", "#ce9178")
-            return
+            if on_done:
+                on_done({"status": "error", "message": "GUI 当前没有 SSH 会话"})
+            return {"status": "error", "message": "GUI 当前没有 SSH 会话"}
+
+        if self._busy:
+            if source != "Agent":
+                result = {"status": "error", "message": "当前终端正在执行 Agent 命令"}
+                if on_done:
+                    on_done(result)
+                return result
+            if len(self._pending_commands) >= self.MAX_AGENT_QUEUE:
+                result = {
+                    "status": "error",
+                    "message": f"Agent 命令队列已满（最多 {self.MAX_AGENT_QUEUE} 条）",
+                }
+                if on_done:
+                    on_done(result)
+                return result
+            self._pending_commands.append((text, on_done, source, timeout, sid))
+            position = len(self._pending_commands)
+            self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#dcdcaa")
+            return {"status": "queued", "position": position}
+
+        self._start_execute(text, on_done, source, timeout, sid)
+        return {"status": "running"}
+
+    def _start_execute(self, text, on_done, source, timeout, sid):
+        """实际启动一条命令；调用方必须确保当前没有活动命令。"""
 
         # 历史记录
         self._history.append(text)
         self._history_index = len(self._history)
 
         # 回显命令
-        self._append_output(f"$ {text}\n", "#569cd6")
+        suffix = "  [Agent]" if source == "Agent" else ""
+        self._append_output(f"$ {text}{suffix}\n", "#4fc1ff" if suffix else "#569cd6")
         self.input.clear()
         self.input.setEnabled(False)
+        self._busy = True
+        self._result_callback = on_done
+        self._active_command = text
 
         # 通过 SSHBridge 异步执行（同一 event loop）
         from app.ssh.manager import SSHManager
@@ -141,13 +195,12 @@ class TerminalWidget(QWidget):
         manager = SSHManager()
 
         async def _exec():
-            return await manager.exec_command(sid, text)
+            return await manager.exec_command(sid, text, timeout=timeout)
 
         SSHBridge().submit_async(_exec(), self._on_result)
 
     def _on_result(self, result: dict):
-        self.input.setEnabled(True)
-        self.input.setFocus()
+        self._busy = False
 
         if result["status"] == "success":
             stdout = result.get("stdout", "")
@@ -158,6 +211,35 @@ class TerminalWidget(QWidget):
                 self._append_output(stderr, "#ce9178")
         else:
             self._append_output(f"❌ {result['message']}\n", "#f44747")
+
+        callback = self._result_callback
+        command = self._active_command
+        self._result_callback = None
+        self._active_command = ""
+        if callback:
+            callback(result)
+        self.command_executed.emit(command, result)
+
+        if self._pending_commands:
+            QTimer.singleShot(0, self._run_next)
+        else:
+            self.input.setEnabled(True)
+            self.input.setFocus()
+
+    def _run_next(self):
+        if self._busy:
+            return
+        while self._pending_commands:
+            text, on_done, source, timeout, sid = self._pending_commands.popleft()
+            if sid != self._session_id:
+                result = {"status": "error", "message": f"排队期间当前会话已切换: {sid}"}
+                if on_done:
+                    on_done(result)
+                continue
+            self._start_execute(text, on_done, source, timeout, sid)
+            return
+        self.input.setEnabled(True)
+        self.input.setFocus()
 
     def _append_output(self, text: str, color: str = "#d4d4d4"):
         cursor = self.output.textCursor()

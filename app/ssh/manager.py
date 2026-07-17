@@ -72,8 +72,18 @@ class SSHManager:
         """
         session_id = f"{user}@{host}:{port}"
 
-        # 如果已有活跃会话，先断开
-        if session_id in self._sessions:
+        # 同一个 session_id 只保留一条连接；不同 session_id 可同时存在。
+        existing = self._sessions.get(session_id)
+        if existing is not None and existing.conn is not None and not existing.conn.is_closed():
+            existing.touch()
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "message": f"已复用当前会话 {session_id}",
+                "reused": True,
+            }
+
+        if existing is not None:
             await self.disconnect(session_id)
 
         try:
@@ -174,7 +184,7 @@ class SSHManager:
         session.touch()
         try:
             result = await asyncio.wait_for(
-                session.conn.run(command, encoding="utf-8"),
+                session.conn.run(command, encoding="utf-8", term_type="xterm-256color"),
                 timeout=timeout,
             )
             return {

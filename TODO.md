@@ -8,11 +8,11 @@
 
 ## MVP 版本目标（第一版）
 
-- [ ] Windows GUI — 人工操作界面
-- [ ] SSH 连接 — 多服务器会话管理
-- [ ] 实时 Terminal — 人工/AI 共享终端
-- [ ] MCP Server — 暴露 SSH 工具给 AI
-- [ ] 人工接管 — 随时介入 AI 操作
+- [x] Windows GUI — 人工操作界面
+- [x] SSH 连接 — 多服务器会话管理
+- [x] 实时 Terminal — 人工/AI 共享当前 GUI 会话
+- [x] MCP Server — 暴露 SSH 工具给 AI
+- [x] 人工接管 — 代理执行与命令补全
 - [ ] 命令确认 — 危险命令拦截
 
 ---
@@ -71,11 +71,16 @@
 >
 > 将 SSH 终端能力封装为标准化 MCP 工具，供外部 AI Agent 调用。
 
-- [ ] `ssh_connect` — 创建 SSH 会话
-- [ ] `terminal_write` — 发送命令
-- [ ] `terminal_read` — 读取输出
-- [ ] `upload_file` — 上传文件
-- [ ] `download_file` — 下载文件
+- [x] `launch_gui` — 启动共享会话 GUI
+- [x] MCP Server 与 GUI 的本地认证 IPC
+- [x] `ssh_connect` — 在 GUI 中创建 SSH 会话
+- [x] `ssh_exec` / `proxy_command` — 在当前 GUI 会话代理执行并显示结果
+- [x] `autocomplete_command` — 填入 GUI 输入框，由用户确认
+- [x] `list_sessions` / `select_session` — 查询全部 SSH 会话并切换 GUI 当前会话
+- [x] `terminal_write` — 发送命令
+- [x] `terminal_read` — 读取输出
+- [x] `upload_file` — 上传文件
+- [x] `download_file` — 下载文件
 
 ---
 

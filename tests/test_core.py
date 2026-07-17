@@ -164,6 +164,7 @@ def test_mcp_tools_registration():
     print("Test 4: MCP 工具注册")
     print("=" * 60)
 
+    import app.tools.definitions as definitions
     from app.tools.definitions import mcp
     from mcp.server.fastmcp import FastMCP
 
@@ -175,6 +176,10 @@ def test_mcp_tools_registration():
     tool_manager = mcp._tool_manager
     tools = tool_manager._tools
     expected = {
+        "launch_gui",
+        "proxy_command",
+        "autocomplete_command",
+        "select_session",
         "ssh_connect",
         "ssh_disconnect",
         "ssh_exec",
@@ -196,6 +201,10 @@ def test_mcp_tools_registration():
     print(f"  ✅ 已注册 {len(registered)} 个工具:")
     for name in sorted(registered):
         print(f"     - {name}")
+
+    # 后续工具调用使用测试替身，不能污染或锁住正在运行程序的生产日志。
+    definitions._test_original_log_call = definitions._log_call
+    definitions._log_call = lambda *_args, **_kwargs: None
 
     print("  ✅ Test 4 通过")
 
@@ -325,40 +334,31 @@ def test_logging():
     print("Test 8: 日志与历史记录")
     print("=" * 60)
 
-    import logging
+    import tempfile
+    import app.tools.definitions as definitions
 
-    from app.tools.definitions import _log_call, tool_logger
+    original_log_dir = definitions.LOG_DIR
+    original_history_file = definitions.HISTORY_FILE
+    with tempfile.TemporaryDirectory(prefix="mcpterminal-test-") as temp_dir:
+        definitions.LOG_DIR = temp_dir
+        definitions.HISTORY_FILE = os.path.join(temp_dir, "tool_call_history.json")
+        definitions.tool_logger = definitions._setup_logger()
+        try:
+            real_log_call = definitions._test_original_log_call
+            real_log_call("test_tool", {"arg1": "val1"}, {"status": "success"})
+            real_log_call("test_tool", {"arg1": "val2"}, {"status": "error"})
 
-    log_dir = "logs"
-    history_file = os.path.join(log_dir, "tool_call_history.json")
-    log_file = os.path.join(log_dir, "tool_calls.log")
-
-    # 释放日志文件句柄
-    for handler in tool_logger.handlers[:]:
-        handler.close()
-        tool_logger.removeHandler(handler)
-
-    # 清理旧日志
-    for f in [history_file, log_file]:
-        if os.path.exists(f):
-            os.remove(f)
-
-    # 重新初始化日志（写入测试记录）
-    from app.tools.definitions import _setup_logger as _reinit_logger
-    # 直接写入历史，绕过 logger（因为 logger 已被重置）
-    _log_call("test_tool", {"arg1": "val1"}, {"status": "success"})
-    _log_call("test_tool", {"arg1": "val2"}, {"status": "error"})
-
-    # 验证历史文件
-    assert os.path.exists(history_file), "应创建 tool_call_history.json"
-    with open(history_file, "r", encoding="utf-8") as f:
-        history = json.load(f)
-    assert len(history) == 2
-    assert history[0]["tool"] == "test_tool"
-    print(f"  ✅ 调用历史: {len(history)} 条记录")
-
-    # 重新初始化 logger 以便后续使用
-    _reinit_logger()
+            with open(definitions.HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            assert len(history) == 2
+            assert history[0]["tool"] == "test_tool"
+            print(f"  ✅ 调用历史: {len(history)} 条记录（隔离目录）")
+        finally:
+            for handler in definitions.tool_logger.handlers[:]:
+                handler.close()
+                definitions.tool_logger.removeHandler(handler)
+            definitions.LOG_DIR = original_log_dir
+            definitions.HISTORY_FILE = original_history_file
 
     print("  ✅ Test 8 通过")
 

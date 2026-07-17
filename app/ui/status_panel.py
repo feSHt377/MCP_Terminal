@@ -70,7 +70,14 @@ class StatusPanel(QWidget):
 
     def log_tool_call(self, tool: str, status: str):
         """记录 MCP 工具调用。"""
-        color = "#6a9955" if status == "success" else "#f44747"
+        colors = {
+            "success": "#6a9955",
+            "running": "#4fc1ff",
+            "exec": "#4fc1ff",
+            "queued": "#dcdcaa",
+            "error": "#f44747",
+        }
+        color = colors.get(status, "#ce9178")
         self._append(f"[{self._now()}] MCP:{tool} → {status}\n", color)
 
     def log_error(self, message: str):

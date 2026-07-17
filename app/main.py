@@ -1,6 +1,6 @@
 """mcpterminal 主入口。
 
-默认启动 GUI 模式。使用 --mcp 参数以 MCP Server (stdio) 模式运行。
+默认启动 GUI。--mcp 以 MCP stdio 模式运行。
 """
 
 import sys
@@ -13,6 +13,19 @@ if str(_project_root) not in sys.path:
 
 def run_gui():
     """启动 PySide6 GUI。"""
+    from app.ipc import GuiInstanceLock, call_gui, gui_is_running
+
+    # 锁覆盖 GUI 尚未写出 IPC 状态文件的启动窗口，消除并发启动竞态。
+    instance_lock = GuiInstanceLock()
+    if not instance_lock.acquire():
+        if instance_lock.wait_for_existing():
+            call_gui("activate", timeout=1.0)
+        return
+    if gui_is_running():
+        call_gui("activate", timeout=1.0)
+        instance_lock.release()
+        return
+
     from PySide6.QtWidgets import QApplication
     from app.ui.main_window import MainWindow
 
@@ -20,15 +33,22 @@ def run_gui():
     app.setApplicationName("mcpterminal")
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    finally:
+        instance_lock.release()
+    sys.exit(exit_code)
 
 
 def run_mcp():
     """以 MCP stdio 模式运行。"""
-    from app.tools.definitions import mcp
-
-    print("mcpterminal MCP Server 启动中...")
-    print("传输模式: stdio")
+    try:
+        from app.tools.definitions import mcp
+    except ModuleNotFoundError as exc:
+        sys.stderr.write(
+            f"mcpterminal 缺少依赖 {exc.name!r}。请先运行 Install.cmd 或 setup.ps1。\n"
+        )
+        raise SystemExit(2) from exc
     mcp.run(transport="stdio")
 
 
