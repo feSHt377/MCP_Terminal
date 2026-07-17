@@ -3,38 +3,166 @@
 > **定位：Agent 的手和脚，不是大脑。**
 >
 > mcpterminal 为 AI Agent（Codex、Claude Code 等）提供可靠的远程服务器执行环境。
-> 它是一个 MCP Tool Server，把 SSH 终端能力暴露为标准化工具，
+> 它是一个 MCP Tool Server，将 SSH 终端能力暴露为标准化工具，
 > 让 AI 可以操作远程服务器，同时保留人类的实时观察、干预和接管能力。
 
+## 架构总览
+
 ```text
-AI Agent (Codex / Claude / ...)
-        │ MCP / stdio
-        ▼
-MCP Server (app.main --mcp)
-        │ 本地回环 IPC（认证令牌）
-        ▼
-Terminal GUI ── 唯一的 SSHManager / SSH 会话 ──► Remote Server
-    ▲   ▲
-    │   └── Agent：proxy_command / ssh_exec 代理执行，或 autocomplete_command 补全
-    └────── Human：在 GUI 输入、干预和接管
+┌──────────────────────────────────────────────────────────────┐
+│  AI Agent (Codex / Claude Code / ...)                        │
+│  └── MCP Client (stdio)                                      │
+└───────────────────────┬──────────────────────────────────────┘
+                        │  MCP Protocol
+                        ▼
+┌──────────────────────────────────────────────────────────────┐
+│  MCP Server  (python -m app.main --mcp)                      │
+│  ├── 16+ 标准化工具 (SSH / 文件传输 / 会话管理 / 安全策略)     │
+│  └── 内置 Agent 层 (LLM + Function Calling)                  │
+└───────────────────────┬──────────────────────────────────────┘
+                        │  本地回环 IPC (JSON-RPC + 认证令牌)
+                        ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Terminal GUI  (PySide6)                                     │
+│  ├── 唯一 SSHManager ── 多服务器会话管理                      │
+│  ├── 当前终端绑定 ── 人工/AI 共享同一终端                      │
+│  ├── 聊天窗口 ── 自然语言指令输入                              │
+│  └── 安全策略 ── 危险命令拦截 & 审批                           │
+└───────────────────────┬──────────────────────────────────────┘
+                        │  SSH
+                        ▼
+              ┌──────────────────┐
+              │  Remote Servers  │
+              │  (Linux / LXD)   │
+              └──────────────────┘
 ```
 
-GUI 进程是 SSH 会话的唯一所有者，SSHManager 仍支持同时管理多个服务器会话；
-GUI 当前终端只绑定其中一个“当前会话”，Agent 的代理与补全也只作用于该会话。
-MCP Server 不建立第二条 SSH 连接，而是通过本地 IPC 请求 GUI 操作已有会话。
-重复启动 GUI 会激活已有窗口，不会创建第二个终端程序实例。
-`list_sessions` 仅查询 SSHManager 中的会话；切换 GUI 当前会话使用 `select_session`。
+**核心设计原则：**
 
-## MVP 目标
+- GUI 进程是 SSH 会话的**唯一所有者**，MCP Server 不建立第二条 SSH 连接
+- MCP Server 通过本地 IPC（回环地址 + 随机令牌）请求 GUI 操作已有会话
+- 重复启动 GUI 会激活已有窗口，不会创建第二个终端程序实例
+- `list_sessions` 查询所有会话；`select_session` 切换 GUI 当前焦点
 
-> "AI 版 SecureCRT" — 既是人工运维终端，也是 AI 的工具平台
+## 快速开始
 
-- ✅ Windows GUI — 人类操作的终端界面
-- ✅ SSH 连接 — 多服务器会话管理
-- ✅ 实时 Terminal — 人工/AI 共享同一终端
-- ✅ MCP Server — 将 SSH 能力标准化为 AI 可调用的工具
-- ✅ 人工接管 — 随时介入 AI 的操作
-- ✅ 命令确认 — 危险命令拦截与审批
+### 安装
+
+需要 **Python 3.10–3.14**。Windows 用户可直接双击 `Install.cmd`，或在 PowerShell 中执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+安装并立即打开 GUI：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -RunGui
+```
+
+脚本会自动创建 `.venv`、安装运行时依赖并执行核心测试。
+
+### 启动 GUI
+
+```bash
+python -m app.main
+```
+
+### 启动 MCP Server
+
+```bash
+python -m app.main --mcp
+```
+
+MCP Server 通过 stdio 与 AI Agent 通信，不在握手期间联网安装依赖。
+
+## MCP 工具集
+
+mcpterminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用：
+
+### 终端控制
+
+| 工具 | 说明 |
+|------|------|
+| `launch_gui` | 启动或激活 GUI 终端窗口 |
+
+### SSH 连接
+
+| 工具 | 说明 |
+|------|------|
+| `ssh_connect` | 建立到远程服务器的 SSH 连接 |
+| `ssh_disconnect` | 断开指定的 SSH 会话 |
+
+### 命令执行
+
+| 工具 | 说明 |
+|------|------|
+| `proxy_command` | 在 GUI 当前会话代理执行命令（推荐） |
+| `ssh_exec` | 通过 session_id 在指定会话执行命令 |
+| `autocomplete_command` | 将命令补全到 GUI 输入框，交由用户确认 |
+
+### 交互式终端
+
+| 工具 | 说明 |
+|------|------|
+| `terminal_write` | 向交互式 SSH shell 写入数据 |
+| `terminal_read` | 从交互式 SSH shell 读取输出 |
+
+### 文件传输
+
+| 工具 | 说明 |
+|------|------|
+| `upload_file` | 上传本地文件到远程服务器（SFTP） |
+| `download_file` | 从远程服务器下载文件到本地（SFTP） |
+
+### 服务器与会话管理
+
+| 工具 | 说明 |
+|------|------|
+| `list_servers` | 列出配置文件中定义的所有服务器 |
+| `list_sessions` | 列出所有活跃的 SSH 会话及状态 |
+| `select_session` | 切换 GUI 当前终端到指定会话 |
+| `add_server` | 添加 SSH 服务器到配置文件 |
+| `remove_server` | 从配置文件中移除服务器 |
+
+### 安全策略
+
+| 工具 | 说明 |
+|------|------|
+| `get_dangerous_commands` | 获取危险命令列表和安全策略 |
+
+## 使用方式
+
+### 方式一：AI Agent 通过 MCP 调用
+
+配置 AI Agent（Codex CLI / Claude Code）的 MCP Client，指向 mcpterminal：
+
+```json
+{
+  "mcpServers": {
+    "mcpterminal": {
+      "command": "python",
+      "args": ["-m", "app.main", "--mcp"]
+    }
+  }
+}
+```
+
+Agent 即可通过自然语言调用所有工具，如：
+
+> "帮我查看服务器的 GPU 状态"
+> "上传本地文件到远程 /tmp 目录"
+
+### 方式二：内置 Agent（自然语言 → 工具调用）
+
+GUI 内置聊天窗口，支持直接输入自然语言指令：
+
+- **LLM 模式**：连接 OpenAI 兼容 API，通过 Function Calling 自动选择工具
+- **模拟模式**：无 API key 时，基于关键词匹配执行（演示用途）
+
+### 方式三：人工操作 GUI
+
+直接通过 GUI 界面连接服务器、执行命令、传输文件，所有操作对 AI Agent 可见。
 
 ## 为什么不是 Agent？
 
@@ -54,7 +182,7 @@ mcpterminal 是 **Agent Runtime / Agent Tool Infrastructure**，提供 Agent 所
 
 ```
 Phase 1 (当前)           Phase 2               Phase 3
-────────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────
 MCP Remote Terminal  →  AI Ops Tool Platform  →  Agent Platform
 (执行基础设施)          (场景工具生态)           (自带 Agent 层)
 ```
@@ -64,58 +192,84 @@ MCP Remote Terminal  →  AI Ops Tool Platform  →  Agent Platform
 ```
 mcpterminal/
 ├── app/
-│   ├── main.py              # GUI 入口
+│   ├── main.py              # GUI / MCP Server 入口
 │   ├── ipc.py               # MCP Server ↔ GUI 本地进程间桥接
+│   ├── agent/               # 内置 Agent 层
+│   │   ├── agent_loop.py    # Agent 循环：自然语言 → 工具调用 → 执行
+│   │   └── llm_client.py    # OpenAI 兼容 API 客户端
 │   ├── ui/                  # 界面（PySide6）
+│   │   ├── main_window.py   # 主窗口
+│   │   ├── server_panel.py  # 服务器管理面板
+│   │   ├── status_panel.py  # 状态面板
+│   │   ├── terminal_widget.py # 终端组件
+│   │   └── chat_window.py   # 聊天窗口
 │   ├── terminal/            # SSH 终端组件
-│   ├── tools/               # MCP 工具定义（场景专用工具）
+│   ├── tools/               # MCP 工具定义
+│   │   └── definitions.py   # 16+ 标准化工具
 │   ├── mcp/                 # MCP Server 核心
+│   │   └── server.py        # FastMCP 服务
 │   ├── ssh/                 # SSH 连接管理
+│   │   ├── manager.py       # SSHManager：多会话管理
+│   │   └── bridge.py        # SSH 桥接
 │   └── config/              # 配置加载
-├── tests/
+│       └── manager.py       # 服务器/安全配置管理
+├── Skills/                  # Agent 技能文档
+│   └── mcpterminal-ops/     # 远程运维操作技能
+├── tests/                   # 测试套件
+├── config.yaml              # 服务器配置
+├── setup.ps1                # Windows 安装脚本
+├── Install.cmd              # Windows 一键安装
 ├── requirements.txt
-├── TODO.md
-├── config.yaml
 └── README.md
 ```
 
 ## 技术栈
 
-- **GUI**: PySide6 + QML
-- **SSH**: asyncssh / paramiko
-- **终端**: QTermWidget / xterm.js
-- **AI协议**: MCP (Model Context Protocol)
-- **AI后端**: Codex CLI / Claude Code（作为 MCP Client）
-- **数据库**: SQLite
+| 类别 | 技术 |
+|------|------|
+| **GUI** | PySide6 |
+| **SSH** | asyncssh / paramiko |
+| **AI 协议** | MCP (Model Context Protocol) / FastMCP |
+| **AI 后端** | Codex CLI / Claude Code（MCP Client） |
+| **LLM** | OpenAI 兼容 API（Function Calling） |
+| **IPC** | 本地回环 JSON-RPC |
+| **数据库** | SQLite |
 
-## 安装与启动
+## 配置
 
-### 源码用户（一次安装）
+服务器配置位于 `config.yaml`：
 
-需要 Python 3.10–3.14。Windows 用户可以直接双击 `Install.cmd`，或在 PowerShell
-中执行：
+```yaml
+servers:
+  my-server:
+    host: 192.168.1.100
+    port: 22
+    user: root
+    key_path: ~/.ssh/id_rsa
 
-```powershell
+security:
+  dangerous_commands:
+    - rm -rf
+    - format
+  require_confirmation: true
+```
+
+## 开发
+
+```bash
+# 安装依赖
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
+
+# 运行测试
+python -m pytest tests/
+
+# 启动 GUI
+python -m app.main
+
+# 启动 MCP Server
+python -m app.main --mcp
 ```
 
-安装并立即打开 GUI：
+## 许可证
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup.ps1 -RunGui
-```
-
-脚本会创建 `.venv`、安装运行时依赖并执行核心测试。MCP Server 本身只做依赖
-检查和协议启动，不在 stdio 握手期间联网安装依赖。
-
-
-## 开发顺序
-
-```
-1. PySide6 GUI         ← 当前
-2. SSH Terminal
-3. MCP Server
-4. 接入 Codex/Claude
-5. LXD/GPU/Docker 场景工具
-6. (未来) 内置 Agent 层
-```
+[MIT](LICENSE)
