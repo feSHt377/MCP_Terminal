@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # 确保项目根目录在 sys.path
@@ -102,7 +103,36 @@ def test_ssh_manager_sync():
     assert sess.session_id == "test@1.2.3.4:22"
     assert sess.port == 22
     assert sess.conn is None
+    assert sess.current_dir == "~"
+    assert sess.remote_hostname == ""
     print("  ✅ SSHSession 数据类")
+
+    # 实时输入必须绕过正在等待的长命令，但不能改变普通命令的串行队列。
+    from PySide6.QtCore import QCoreApplication
+    from app.ssh.bridge import SSHBridge
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    bridge = SSHBridge()
+    bridge.start()
+    completed = []
+
+    async def _slow():
+        await asyncio.sleep(0.2)
+        return {"status": "success", "name": "slow"}
+
+    async def _realtime():
+        await asyncio.sleep(0.01)
+        return {"status": "success", "name": "realtime"}
+
+    bridge.submit_async(_slow(), lambda result: completed.append(result["name"]))
+    bridge.submit_realtime(_realtime(), lambda result: completed.append(result["name"]))
+    deadline = time.monotonic() + 2.0
+    while len(completed) < 2 and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    bridge.stop()
+    assert completed == ["realtime", "slow"], completed
+    print("  ✅ SSHBridge 实时输入绕过长命令等待")
 
     print("  ✅ Test 2 通过")
 
@@ -121,6 +151,11 @@ async def _test_ssh_manager_async_inner():
     result = await m.exec_command("no@host:22", "ls")
     assert result["status"] == "error"
     print("  ✅ exec_command() 不存在会话 → 错误提示")
+
+    # exec_command_stream 不存在会话
+    result = await m.exec_command_stream("no@host:22", "ls")
+    assert result["status"] == "error"
+    print("  ✅ exec_command_stream() 不存在会话 → 错误提示")
 
     # terminal_write 不存在会话
     result = await m.terminal_write("no@host:22", "echo hi\n")
@@ -141,6 +176,10 @@ async def _test_ssh_manager_async_inner():
     result = await m.download_file("no@host:22", "/tmp/a", "/tmp/b")
     assert result["status"] == "error"
     print("  ✅ download_file() 不存在会话 → 错误提示")
+
+    from app.ui.terminal_widget import strip_terminal_control
+    assert strip_terminal_control("\x1b[31mred\x1b[0m") == "red"
+    print("  ✅ ANSI 终端控制码清理")
 
 
 def test_ssh_manager_async():

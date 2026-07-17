@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import asyncssh
 
@@ -30,6 +30,9 @@ class SSHSession:
     user: str = "root"
     conn: asyncssh.SSHClientConnection | None = None
     shell: asyncssh.SSHClientProcess | None = None
+    active_process: asyncssh.SSHClientProcess | None = None
+    remote_hostname: str = ""
+    current_dir: str = "~"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_used: str = field(default_factory=lambda: datetime.now().isoformat())
     output_buffer: list[str] = field(default_factory=list)
@@ -81,6 +84,8 @@ class SSHManager:
                 "session_id": session_id,
                 "message": f"已复用当前会话 {session_id}",
                 "reused": True,
+                "remote_hostname": existing.remote_hostname or existing.host,
+                "current_dir": existing.current_dir,
             }
 
         if existing is not None:
@@ -109,6 +114,25 @@ class SSHManager:
                 term_size=(80, 24),
             )
 
+            # 获取真实远程提示符信息，GUI 不再用连接 IP 冒充主机名。
+            remote_hostname = host
+            current_dir = "~"
+            try:
+                identity = await conn.run(
+                    "printf '%s\\n%s\\n%s\\n' \"$(hostname)\" \"$HOME\" \"$PWD\"",
+                    encoding="utf-8",
+                    check=False,
+                )
+                identity_lines = (identity.stdout or "").splitlines()
+                if identity_lines and identity_lines[0].strip():
+                    remote_hostname = identity_lines[0].strip()
+                if len(identity_lines) > 2 and identity_lines[2].strip():
+                    home = identity_lines[1].strip()
+                    pwd = identity_lines[2].strip()
+                    current_dir = "~" if home and pwd == home else pwd
+            except Exception:
+                logger.debug("无法读取远程提示符信息，使用连接参数", exc_info=True)
+
             session = SSHSession(
                 session_id=session_id,
                 host=host,
@@ -116,6 +140,8 @@ class SSHManager:
                 user=user,
                 conn=conn,
                 shell=shell,
+                remote_hostname=remote_hostname,
+                current_dir=current_dir,
             )
             self._sessions[session_id] = session
 
@@ -124,6 +150,8 @@ class SSHManager:
                 "status": "success",
                 "session_id": session_id,
                 "message": f"已连接到 {session_id}",
+                "remote_hostname": remote_hostname,
+                "current_dir": current_dir,
             }
 
         except asyncssh.Error as e:
@@ -140,6 +168,8 @@ class SSHManager:
             return {"status": "error", "message": f"会话不存在: {session_id}"}
 
         try:
+            if session.active_process is not None:
+                session.active_process.terminate()
             if session.shell is not None:
                 session.shell.close()
             if session.conn is not None:
@@ -200,6 +230,97 @@ class SSHManager:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    async def exec_command_stream(
+        self,
+        session_id: str,
+        command: str,
+        timeout: float = 30.0,
+        on_output: Callable[[str, bool], None] | None = None,
+    ) -> dict[str, Any]:
+        """在 PTY 中执行命令并增量推送输出。
+
+        ``on_output(text, is_stderr)`` 在 SSH 事件循环线程中调用。调用方应通过
+        Qt Signal 等线程安全机制把内容转交给 GUI。活动进程保存在会话中，使
+        ``terminal_write`` 和人工终端键盘可以继续回答提示、发送 Ctrl+C 等输入。
+        """
+        session = self._sessions.get(session_id)
+        if session is None or session.conn is None:
+            return {"status": "error", "message": f"会话不存在或未连接: {session_id}"}
+        if session.active_process is not None:
+            return {"status": "error", "message": f"会话已有运行中的命令: {session_id}"}
+
+        session.touch()
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        process: asyncssh.SSHClientProcess | None = None
+
+        async def _pump(stream, target: list[str], is_stderr: bool) -> None:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+                target.append(text)
+                if on_output is not None:
+                    on_output(text, is_stderr)
+
+        try:
+            process = await session.conn.create_process(
+                command,
+                encoding="utf-8",
+                term_type="xterm-256color",
+                term_size=(120, 36),
+            )
+            session.active_process = process
+
+            async def _run() -> None:
+                await asyncio.gather(
+                    _pump(process.stdout, stdout_parts, False),
+                    _pump(process.stderr, stderr_parts, True),
+                )
+                await process.wait_closed()
+
+            await asyncio.wait_for(_run(), timeout=timeout)
+            exit_code = process.exit_status
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "command": command,
+                "stdout": "".join(stdout_parts),
+                "stderr": "".join(stderr_parts),
+                "exit_code": exit_code,
+                "streamed": True,
+            }
+        except asyncio.TimeoutError:
+            if process is not None:
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(process.wait_closed(), timeout=3.0)
+                except (OSError, asyncio.TimeoutError):
+                    process.kill()
+            return {
+                "status": "error",
+                "session_id": session_id,
+                "command": command,
+                "message": f"命令超时 ({timeout}s): {command}",
+                "stdout": "".join(stdout_parts),
+                "stderr": "".join(stderr_parts),
+                "streamed": True,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "session_id": session_id,
+                "command": command,
+                "message": str(e),
+                "stdout": "".join(stdout_parts),
+                "stderr": "".join(stderr_parts),
+                "streamed": True,
+            }
+        finally:
+            if session.active_process is process:
+                session.active_process = None
+
     # ------------------------------------------------------------------
     # 交互式终端
     # ------------------------------------------------------------------
@@ -219,9 +340,15 @@ class SSHManager:
 
         session.touch()
         try:
-            session.shell.stdin.write(data)
+            target = session.active_process or session.shell
+            target.stdin.write(data)
             logger.info("[%s] 写入: %r", session_id, data.strip())
-            return {"status": "success", "session_id": session_id, "written": data}
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "written": data,
+                "target": "active_process" if session.active_process else "shell",
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -331,5 +458,7 @@ class SSHManager:
                 "created_at": s.created_at,
                 "last_used": s.last_used,
                 "connected": s.conn is not None and not s.conn.is_closed(),
+                "remote_hostname": s.remote_hostname or s.host,
+                "current_dir": s.current_dir,
             }
         return {"status": "success", "sessions": sessions, "count": len(sessions)}

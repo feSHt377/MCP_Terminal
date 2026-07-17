@@ -27,13 +27,14 @@ class ServerPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        self.setStyleSheet("background:#0d1117;")
 
         # ---- 标题 ----
         title = QLabel("  🖥  服务器")
         title.setFont(QFont("", 11, QFont.Bold))
-        title.setStyleSheet("color: #cccccc; padding: 8px 0 4px 0;")
+        title.setStyleSheet("color:#e6edf3;padding:6px 2px;font-weight:600;")
         layout.addWidget(title)
 
         # ---- 列表 ----
@@ -41,21 +42,23 @@ class ServerPanel(QWidget):
         self.list_widget.setFrameStyle(QFrame.NoFrame)
         self.list_widget.setStyleSheet("""
             QListWidget {
-                background-color: #252526;
-                color: #cccccc;
-                border: none;
+                background:#010409;
+                color:#c9d1d9;
+                border:1px solid #30363d;
+                border-radius:8px;
                 font-size: 12px;
             }
             QListWidget::item {
-                padding: 8px 10px;
-                border-bottom: 1px solid #3c3c3c;
+                padding:10px;
+                margin:3px;
+                border-radius:6px;
             }
             QListWidget::item:selected {
-                background-color: #094771;
-                color: #ffffff;
+                background:#1f6feb;
+                color:#ffffff;
             }
             QListWidget::item:hover {
-                background-color: #2a2d2e;
+                background:#21262d;
             }
         """)
         self.list_widget.itemDoubleClicked.connect(self._on_double_click)
@@ -80,7 +83,7 @@ class ServerPanel(QWidget):
 
         # ---- 状态 ----
         self.status_label = QLabel("  未连接")
-        self.status_label.setStyleSheet("color: #808080; font-size: 11px; padding: 4px 0;")
+        self.status_label.setStyleSheet("color:#8b949e;font-size:11px;padding:4px 2px;")
         layout.addWidget(self.status_label)
 
     def load_servers(self, servers: dict):
@@ -97,7 +100,7 @@ class ServerPanel(QWidget):
         self.connect_btn.setEnabled(False)
         self.disconnect_btn.setEnabled(True)
         self.status_label.setText(f"  ✅ 已连接: {session_id}")
-        self.status_label.setStyleSheet("color: #6a9955; font-size: 11px; padding: 4px 0;")
+        self.status_label.setStyleSheet("color:#7ee787;font-size:11px;padding:4px 2px;")
 
     def set_disconnected(self):
         """标记为已断开。"""
@@ -105,7 +108,7 @@ class ServerPanel(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
         self.status_label.setText("  未连接")
-        self.status_label.setStyleSheet("color: #808080; font-size: 11px; padding: 4px 0;")
+        self.status_label.setStyleSheet("color:#8b949e;font-size:11px;padding:4px 2px;")
 
     # ------------------------------------------------------------------
     # 事件
@@ -135,18 +138,19 @@ class ServerPanel(QWidget):
     def _btn_style(self) -> str:
         return """
             QPushButton {
-                background-color: #0e639c;
-                color: white;
-                border: none;
-                padding: 6px 12px;
+                background:#238636;
+                color:#ffffff;
+                border:1px solid #2ea043;
+                padding:7px 12px;
                 font-size: 12px;
-                border-radius: 3px;
+                border-radius:6px;
             }
             QPushButton:hover {
-                background-color: #1177bb;
+                background:#2ea043;
             }
             QPushButton:disabled {
-                background-color: #3c3c3c;
-                color: #808080;
+                background:#21262d;
+                color:#8b949e;
+                border-color:#30363d;
             }
         """

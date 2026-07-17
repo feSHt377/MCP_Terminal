@@ -1,6 +1,9 @@
 # 隐藏文件夹（以 . 开头）
 .*/
 
+# 例外：GitHub 配置与 Agent 定义
+!.github/
+
 # 日志文件
 *.txt
 logs/

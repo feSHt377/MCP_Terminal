@@ -126,3 +126,28 @@ class SSHBridge(QThread):
 
         self.result_ready.connect(_handler)
         self._task_queue.put((task_id, coro, on_done))
+
+    def submit_realtime(self, coro, on_done):
+        """在同一事件循环立即调度短操作，不等待串行命令队列。
+
+        仅用于向已经运行的交互进程写入键盘数据等不会新建远程命令的操作。
+        普通命令必须继续使用 ``submit_async``，以保留严格的串行执行语义。
+        """
+        self._wait_ready()
+        task_id = f"realtime-{self._counter}"
+        self._counter += 1
+
+        def _handler(tid, result):
+            if tid == task_id:
+                self.result_ready.disconnect(_handler)
+                on_done(result)
+
+        async def _run_realtime():
+            try:
+                result = await coro
+            except Exception as exc:
+                result = {"status": "error", "message": str(exc)}
+            self.result_ready.emit(task_id, result)
+
+        self.result_ready.connect(_handler)
+        asyncio.run_coroutine_threadsafe(_run_realtime(), self._loop)

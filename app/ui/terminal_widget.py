@@ -1,158 +1,386 @@
-"""终端组件 — 输出显示 + 命令输入。
+"""Interactive SSH terminal with streaming output and a shared Agent/Human session."""
 
-人工通过此组件直接操作远程服务器，不经过 MCP 协议。
-"""  # noqa: D205
+from __future__ import annotations
 
+import re
 from collections import deque
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QColor, QTextCursor
+from PySide6.QtGui import QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLineEdit,
     QPlainTextEdit,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
 
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\))|(?:\x1B[@-_][0-?]*[ -/]*[@-~])"
+)
+
+
+def strip_terminal_control(text: str) -> str:
+    """Remove ANSI/OSC control sequences while preserving CR progress updates."""
+    return _ANSI_ESCAPE_RE.sub("", text).replace("\x00", "")
+
+
+class TerminalSurface(QPlainTextEdit):
+    """Read-only document which still accepts terminal-style keyboard input."""
+
+    command_submitted = Signal(str)
+    raw_input = Signal(str)
+    history_requested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMaximumBlockCount(12000)
+        self._connected = False
+        self._busy = False
+        self._prompt = "$ "
+        self._input_buffer = ""
+        self._input_anchor: int | None = None
+
+    def set_terminal_state(self, connected: bool, busy: bool, prompt: str = "") -> None:
+        self._connected = connected
+        self._busy = busy
+        if prompt:
+            self._prompt = prompt
+        if busy:
+            self.cancel_input_line()
+
+    def detach_input_line(self) -> str | None:
+        """Temporarily remove the local input line while asynchronous output is appended."""
+        if self._input_anchor is None:
+            return None
+        saved = self._input_buffer
+        cursor = self.textCursor()
+        cursor.setPosition(self._input_anchor)
+        cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        self.setTextCursor(cursor)
+        self._input_anchor = None
+        return saved
+
+    def restore_input_line(self, text: str | None) -> None:
+        if text is None or self._busy or not self._connected:
+            return
+        self._input_buffer = text
+        self._render_input_line()
+
+    def cancel_input_line(self) -> None:
+        saved = self.detach_input_line()
+        if saved is not None:
+            self._input_buffer = ""
+
+    def replace_input(self, text: str) -> None:
+        self.cancel_input_line()
+        self._input_buffer = text.replace("\r", "").replace("\n", " ")
+        self._render_input_line()
+        self.setFocus()
+
+    def finish_input_line(self) -> str:
+        command = self._input_buffer
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText("\n")
+        self.setTextCursor(cursor)
+        self._input_buffer = ""
+        self._input_anchor = None
+        return command
+
+    def _render_input_line(self) -> None:
+        if not self._connected or self._busy:
+            return
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self._input_anchor = cursor.position()
+
+        prompt_format = QTextCharFormat()
+        prompt_format.setForeground(QColor("#7ee787"))
+        prompt_format.setFontWeight(QFont.Bold)
+        cursor.insertText(self._prompt, prompt_format)
+
+        input_format = QTextCharFormat()
+        input_format.setForeground(QColor("#e6edf3"))
+        cursor.insertText(self._input_buffer, input_format)
+        self.setTextCursor(cursor)
+        self.ensureCursorVisible()
+
+    def _append_typed_text(self, text: str) -> None:
+        if self._input_anchor is None:
+            self._render_input_line()
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor("#e6edf3"))
+        cursor.insertText(text, fmt)
+        self.setTextCursor(cursor)
+        self._input_buffer += text
+        self.ensureCursorVisible()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.matches(QKeySequence.Copy):
+            self.copy()
+            return
+
+        if not self._connected:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if self._busy:
+            if event.matches(QKeySequence.Paste):
+                pasted = QApplication.clipboard().text()
+                if pasted:
+                    self.raw_input.emit(pasted)
+            elif key in (Qt.Key_Return, Qt.Key_Enter):
+                self.raw_input.emit("\n")
+            elif key == Qt.Key_Backspace:
+                self.raw_input.emit("\x7f")
+            elif key == Qt.Key_Tab:
+                self.raw_input.emit("\t")
+            elif key == Qt.Key_C and modifiers & Qt.ControlModifier:
+                self.raw_input.emit("\x03")
+            elif key == Qt.Key_D and modifiers & Qt.ControlModifier:
+                self.raw_input.emit("\x04")
+            elif key == Qt.Key_Up:
+                self.raw_input.emit("\x1b[A")
+            elif key == Qt.Key_Down:
+                self.raw_input.emit("\x1b[B")
+            elif key == Qt.Key_Right:
+                self.raw_input.emit("\x1b[C")
+            elif key == Qt.Key_Left:
+                self.raw_input.emit("\x1b[D")
+            elif event.text():
+                self.raw_input.emit(event.text())
+            else:
+                super().keyPressEvent(event)
+            return
+
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            command = self.finish_input_line()
+            self.command_submitted.emit(command)
+            return
+        if key == Qt.Key_Backspace:
+            if self._input_buffer:
+                self._input_buffer = self._input_buffer[:-1]
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.deletePreviousChar()
+                self.setTextCursor(cursor)
+            return
+        if key == Qt.Key_Escape:
+            self.replace_input("")
+            return
+        if key == Qt.Key_Up:
+            self.history_requested.emit(-1)
+            return
+        if key == Qt.Key_Down:
+            self.history_requested.emit(1)
+            return
+        if event.matches(QKeySequence.Paste):
+            pasted = QApplication.clipboard().text().replace("\r", "").replace("\n", " ")
+            if pasted:
+                self._append_typed_text(pasted)
+            return
+        if event.text() and not modifiers & (Qt.ControlModifier | Qt.AltModifier):
+            self._append_typed_text(event.text())
+            return
+        super().keyPressEvent(event)
+
+
 class TerminalWidget(QWidget):
-    """SSH 终端组件：输出区域 + 命令输入行。
+    """SSH terminal shared by direct human input and MCP Agent commands."""
 
-    通过 SSHBridge 持久化事件循环执行所有 SSH 操作。
-    """
-
-    command_executed = Signal(str, object)  # (command, result_dict)
+    command_executed = Signal(str, object)
+    stream_received = Signal(str, bool)
     MAX_AGENT_QUEUE = 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._session_id: str | None = None
+        self._user = ""
+        self._host = ""
+        self._cwd = "~"
         self._history: list[str] = []
-        self._history_index: int = -1
+        self._history_index = -1
         self._busy = False
         self._result_callback = None
         self._active_command = ""
         self._pending_commands = deque()
         self._setup_ui()
+        self.stream_received.connect(self._on_stream_received)
 
-    def _setup_ui(self):
+    def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(0)
 
-        # ---- 输出区域 ----
-        self.output = QPlainTextEdit()
-        self.output.setReadOnly(True)
+        self.output = TerminalSurface()
         self.output.setFrameStyle(QFrame.NoFrame)
-
-        mono = QFont("Consolas", 10)
+        mono = QFont("Cascadia Mono", 10)
         mono.setStyleHint(QFont.Monospace)
         self.output.setFont(mono)
-
         self.output.setStyleSheet("""
             QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                selection-background-color: #264f78;
-                border: none;
-                padding: 4px;
+                background: #0d1117;
+                color: #c9d1d9;
+                selection-background-color: #1f6feb;
+                border: 1px solid #30363d;
+                border-radius: 8px 8px 0 0;
+                padding: 10px;
             }
+            QScrollBar:vertical { background: #0d1117; width: 10px; }
+            QScrollBar::handle:vertical { background: #30363d; border-radius: 5px; min-height: 28px; }
+            QScrollBar::handle:vertical:hover { background: #484f58; }
         """)
+        self.output.command_submitted.connect(self._on_surface_command)
+        self.output.raw_input.connect(self._send_raw_input)
+        self.output.history_requested.connect(self._browse_history)
         layout.addWidget(self.output, stretch=1)
 
-        # ---- 输入行 ----
         input_frame = QFrame()
-        input_frame.setFrameStyle(QFrame.NoFrame)
-        input_frame.setStyleSheet(
-            "QFrame { background-color: #252526; border-top: 1px solid #3c3c3c; }"
-        )
+        input_frame.setObjectName("terminalInputFrame")
+        input_frame.setStyleSheet("""
+            QFrame#terminalInputFrame {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-top: none;
+                border-radius: 0 0 8px 8px;
+            }
+        """)
         input_layout = QHBoxLayout(input_frame)
-        input_layout.setContentsMargins(8, 4, 8, 4)
+        input_layout.setContentsMargins(10, 7, 10, 7)
+        input_layout.setSpacing(8)
 
         self.prompt_label = QLineEdit()
         self.prompt_label.setReadOnly(True)
         self.prompt_label.setFrame(False)
-        self.prompt_label.setFixedWidth(200)
+        self.prompt_label.setFixedWidth(190)
         self.prompt_label.setStyleSheet(
-            "color: #6a9955; background: transparent; font-weight: bold;"
+            "color:#7ee787;background:transparent;font-family:'Cascadia Mono';font-weight:600;"
         )
 
         self.input = QLineEdit()
         self.input.setFrame(False)
-        self.input.setPlaceholderText("输入命令后按 Enter 执行…")
+        self.input.setPlaceholderText("也可以在上方 Shell 区域直接输入…")
         self.input.setStyleSheet("""
             QLineEdit {
-                color: #d4d4d4;
+                color: #e6edf3;
                 background: transparent;
-                font-family: 'Consolas', monospace;
+                font-family: 'Cascadia Mono', 'Consolas', monospace;
                 font-size: 12px;
                 border: none;
+                padding: 3px;
             }
         """)
         self.input.returnPressed.connect(self._on_send)
 
+        self.activity = QProgressBar()
+        self.activity.setRange(0, 0)
+        self.activity.setTextVisible(False)
+        self.activity.setFixedSize(54, 4)
+        self.activity.setVisible(False)
+        self.activity.setStyleSheet("""
+            QProgressBar { border:none; background:#21262d; border-radius:2px; }
+            QProgressBar::chunk { background:#2f81f7; border-radius:2px; }
+        """)
+
         input_layout.addWidget(self.prompt_label)
-        input_layout.addWidget(self.input)
+        input_layout.addWidget(self.input, stretch=1)
+        input_layout.addWidget(self.activity)
         layout.addWidget(input_frame)
 
-    # ------------------------------------------------------------------
-    # 公共接口
-    # ------------------------------------------------------------------
-
-    def set_session(self, session_id: str | None, user: str = "", host: str = ""):
-        """绑定/解绑 SSH 会话。"""
+    def set_session(
+        self,
+        session_id: str | None,
+        user: str = "",
+        host: str = "",
+        cwd: str = "~",
+    ) -> None:
         self._session_id = session_id
+        self._user = user
+        self._host = host
+        self._cwd = cwd or "~"
         if session_id:
-            self.prompt_label.setText(f" {user}@{host} $")
+            prompt = self._prompt_text()
+            self.prompt_label.setText(prompt.strip())
             self.input.setEnabled(True)
-            self.input.setFocus()
-            self._append_output(f"--- 已连接 {session_id} ---\n", "#6a9955")
+            self.output.set_terminal_state(True, self._busy, prompt)
+            self.output.setFocus()
+            self._append_output(f"\n— 已连接 {session_id} —\n", "#7ee787")
+            self.output.replace_input("")
         else:
-            self.prompt_label.setText(" 未连接")
+            self.prompt_label.setText("未连接")
             self.input.setEnabled(False)
-            self._append_output("--- 已断开 ---\n", "#6a9955")
+            self.output.set_terminal_state(False, False)
+            self._append_output("\n— 已断开 —\n", "#8b949e")
 
-    def append_line(self, text: str, color: str = "#d4d4d4"):
-        """向输出区追加一行（供外部调用）。"""
+    def append_line(self, text: str, color: str = "#c9d1d9") -> None:
         self._append_output(text, color)
+
+    def clear_terminal(self) -> None:
+        self.output.cancel_input_line()
+        self.output.clear()
+        if self._session_id and not self._busy:
+            self.output.replace_input("")
 
     def execute_command(
         self, cmd: str, on_done=None, source: str = "Agent", timeout: float = 30.0
-    ):
-        """代理：将命令注入输入框并立即执行。Agent 通过此方法操作用户的主终端。"""
+    ) -> dict:
         return self._execute(cmd, on_done=on_done, source=source, timeout=timeout)
 
-    def set_input_text(self, text: str):
-        """补全：将命令填入输入框但不执行。用户可修改后手动 Enter。"""
+    def set_input_text(self, text: str) -> None:
         self.input.setText(text)
-        self.input.setFocus()
+        self.output.replace_input(text)
 
-    # ------------------------------------------------------------------
-    # 内部
-    # ------------------------------------------------------------------
-
-    def _on_send(self):
+    def _on_send(self) -> None:
         text = self.input.text()
         if not text.strip():
+            self.output.finish_input_line()
+            self.output.replace_input("")
             return
+        self.output.cancel_input_line()
+        self._execute(text, source="Human", timeout=3600.0)
 
-        self._execute(text, source="Human")
+    def _on_surface_command(self, text: str) -> None:
+        self.input.clear()
+        if not text.strip():
+            self.output.replace_input("")
+            return
+        self._execute(text, source="Human", timeout=3600.0, display_echo=False)
+
+    def _prompt_text(self) -> str:
+        return f"{self._user}@{self._host}:{self._cwd}$ "
 
     def _execute(
-        self, text: str, on_done=None, source: str = "Human", timeout: float = 30.0
-    ):
+        self,
+        text: str,
+        on_done=None,
+        source: str = "Human",
+        timeout: float = 30.0,
+        display_echo: bool = True,
+    ) -> dict:
         sid = self._session_id
         if not sid:
-            self._append_output("⚠ 未连接到任何服务器\n", "#ce9178")
+            result = {"status": "error", "message": "GUI 当前没有 SSH 会话"}
+            self._append_output("⚠ 未连接到任何服务器\n", "#f0883e")
             if on_done:
-                on_done({"status": "error", "message": "GUI 当前没有 SSH 会话"})
-            return {"status": "error", "message": "GUI 当前没有 SSH 会话"}
+                on_done(result)
+            return result
 
         if self._busy:
             if source != "Agent":
-                result = {"status": "error", "message": "当前终端正在执行 Agent 命令"}
+                result = {"status": "error", "message": "命令运行中，请直接在 Shell 区域输入交互内容"}
                 if on_done:
                     on_done(result)
                 return result
@@ -164,53 +392,62 @@ class TerminalWidget(QWidget):
                 if on_done:
                     on_done(result)
                 return result
-            self._pending_commands.append((text, on_done, source, timeout, sid))
+            self._pending_commands.append((text, on_done, source, timeout, sid, display_echo))
             position = len(self._pending_commands)
-            self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#dcdcaa")
+            self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#d29922")
             return {"status": "queued", "position": position}
 
-        self._start_execute(text, on_done, source, timeout, sid)
+        self._start_execute(text, on_done, source, timeout, sid, display_echo)
         return {"status": "running"}
 
-    def _start_execute(self, text, on_done, source, timeout, sid):
-        """实际启动一条命令；调用方必须确保当前没有活动命令。"""
-
-        # 历史记录
+    def _start_execute(self, text, on_done, source, timeout, sid, display_echo=True) -> None:
         self._history.append(text)
         self._history_index = len(self._history)
+        if display_echo:
+            suffix = "  [Agent]" if source == "Agent" else ""
+            self._append_output(f"$ {text}{suffix}\n", "#58a6ff" if suffix else "#79c0ff")
 
-        # 回显命令
-        suffix = "  [Agent]" if source == "Agent" else ""
-        self._append_output(f"$ {text}{suffix}\n", "#4fc1ff" if suffix else "#569cd6")
         self.input.clear()
         self.input.setEnabled(False)
         self._busy = True
+        self.activity.setVisible(True)
+        prompt = self._prompt_text()
+        self.output.set_terminal_state(True, True, prompt)
+        self.output.setFocus()
         self._result_callback = on_done
         self._active_command = text
 
-        # 通过 SSHBridge 异步执行（同一 event loop）
-        from app.ssh.manager import SSHManager
         from app.ssh.bridge import SSHBridge
+        from app.ssh.manager import SSHManager
 
         manager = SSHManager()
 
+        def _stream(text_chunk: str, is_stderr: bool) -> None:
+            self.stream_received.emit(text_chunk, is_stderr)
+
         async def _exec():
-            return await manager.exec_command(sid, text, timeout=timeout)
+            return await manager.exec_command_stream(
+                sid, text, timeout=timeout, on_output=_stream
+            )
 
         SSHBridge().submit_async(_exec(), self._on_result)
 
-    def _on_result(self, result: dict):
-        self._busy = False
+    def _on_stream_received(self, text: str, is_stderr: bool) -> None:
+        self._append_output(text, "#ff7b72" if is_stderr else "#c9d1d9", dynamic=True)
 
-        if result["status"] == "success":
-            stdout = result.get("stdout", "")
-            stderr = result.get("stderr", "")
-            if stdout:
-                self._append_output(stdout, "#d4d4d4")
-            if stderr:
-                self._append_output(stderr, "#ce9178")
-        else:
-            self._append_output(f"❌ {result['message']}\n", "#f44747")
+    def _on_result(self, result: dict) -> None:
+        self._busy = False
+        self.activity.setVisible(False)
+
+        if not result.get("streamed"):
+            if result.get("stdout"):
+                self._append_output(result["stdout"], "#c9d1d9")
+            if result.get("stderr"):
+                self._append_output(result["stderr"], "#ff7b72")
+        if result.get("status") != "success":
+            self._append_output(f"\n❌ {result.get('message', '命令执行失败')}\n", "#ff7b72")
+        elif result.get("exit_code") not in (None, 0):
+            self._append_output(f"\n[exit {result['exit_code']}]\n", "#d29922")
 
         callback = self._result_callback
         command = self._active_command
@@ -223,47 +460,68 @@ class TerminalWidget(QWidget):
         if self._pending_commands:
             QTimer.singleShot(0, self._run_next)
         else:
-            self.input.setEnabled(True)
-            self.input.setFocus()
+            self.input.setEnabled(bool(self._session_id))
+            prompt = self._prompt_text()
+            self.output.set_terminal_state(bool(self._session_id), False, prompt)
+            self.output.replace_input("")
+            self.output.setFocus()
 
-    def _run_next(self):
+    def _run_next(self) -> None:
         if self._busy:
             return
         while self._pending_commands:
-            text, on_done, source, timeout, sid = self._pending_commands.popleft()
+            text, on_done, source, timeout, sid, display_echo = self._pending_commands.popleft()
             if sid != self._session_id:
                 result = {"status": "error", "message": f"排队期间当前会话已切换: {sid}"}
                 if on_done:
                     on_done(result)
                 continue
-            self._start_execute(text, on_done, source, timeout, sid)
+            self._start_execute(text, on_done, source, timeout, sid, display_echo)
             return
-        self.input.setEnabled(True)
-        self.input.setFocus()
 
-    def _append_output(self, text: str, color: str = "#d4d4d4"):
+    def _send_raw_input(self, data: str) -> None:
+        if not self._session_id or not self._busy:
+            return
+        from app.ssh.bridge import SSHBridge
+        from app.ssh.manager import SSHManager
+
+        sid = self._session_id
+
+        def _done(result: dict) -> None:
+            if result.get("status") == "error":
+                self._append_output(f"\n⚠ 输入失败: {result.get('message')}\n", "#f0883e")
+
+        SSHBridge().submit_realtime(SSHManager().terminal_write(sid, data), _done)
+
+    def _browse_history(self, direction: int) -> None:
+        if not self._history:
+            return
+        self._history_index = max(0, min(len(self._history), self._history_index + direction))
+        text = "" if self._history_index == len(self._history) else self._history[self._history_index]
+        self.input.setText(text)
+        self.output.replace_input(text)
+
+    def _append_output(self, text: str, color: str = "#c9d1d9", dynamic: bool = False) -> None:
+        if not text:
+            return
+        saved_input = self.output.detach_input_line()
         cursor = self.output.textCursor()
         cursor.movePosition(QTextCursor.End)
-        fmt = cursor.charFormat()
+        fmt = QTextCharFormat()
         fmt.setForeground(QColor(color))
-        cursor.setCharFormat(fmt)
-        cursor.insertText(text)
+
+        clean = strip_terminal_control(text).replace("\r\n", "\n")
+        for char in clean:
+            if dynamic and char == "\r":
+                cursor.movePosition(QTextCursor.StartOfBlock)
+                cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+                cursor.movePosition(QTextCursor.End)
+            elif dynamic and char == "\b":
+                cursor.deletePreviousChar()
+            else:
+                cursor.insertText(char, fmt)
+
         self.output.setTextCursor(cursor)
         self.output.ensureCursorVisible()
-
-    def keyPressEvent(self, event):
-        """键盘事件：上下箭头浏览历史。"""
-        if event.key() == Qt.Key_Up:
-            if self._history and self._history_index > 0:
-                self._history_index -= 1
-                self.input.setText(self._history[self._history_index])
-            return
-        if event.key() == Qt.Key_Down:
-            if self._history_index < len(self._history) - 1:
-                self._history_index += 1
-                self.input.setText(self._history[self._history_index])
-            else:
-                self._history_index = len(self._history)
-                self.input.clear()
-            return
-        super().keyPressEvent(event)
+        self.output.restore_input_line(saved_input)

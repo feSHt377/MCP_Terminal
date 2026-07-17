@@ -1,11 +1,13 @@
 """主窗口 — 三栏布局：服务器列表 | 终端 | 操作日志。"""  # noqa: D205
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PySide6.QtGui import QAction, QCursor, QGuiApplication
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QSplitter,
     QStatusBar,
+    QToolBar,
 )
 
 from app.config.manager import get_servers
@@ -23,13 +25,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("mcpterminal — MCP 远程终端")
-        self.resize(1400, 850)
-        self.setMinimumSize(900, 500)
+        self._fit_current_screen()
+        self._shown_once = False
 
         self._session_id: str | None = None
 
         self._setup_ui()
         self._setup_menu()
+        self._setup_toolbar()
         self._load_servers()
 
         # 启动持久化 SSH 事件循环
@@ -45,15 +48,43 @@ class MainWindow(QMainWindow):
     # UI 搭建
     # ------------------------------------------------------------------
 
+    def _fit_current_screen(self):
+        """按鼠标所在屏幕可用分辨率的 3/5 居中启动。"""
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1152, 648)
+            self.setMinimumSize(640, 400)
+            return
+        area = screen.availableGeometry()
+        width = max(640, round(area.width() * 3 / 5))
+        height = max(400, round(area.height() * 3 / 5))
+        width = min(width, area.width())
+        height = min(height, area.height())
+        self.resize(width, height)
+        self.setMinimumSize(min(640, width), min(400, height))
+        self.move(
+            area.x() + (area.width() - width) // 2,
+            area.y() + (area.height() - height) // 2,
+        )
+
     def _setup_ui(self):
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #1e1e1e;
+                background-color: #010409;
             }
             QStatusBar {
-                background-color: #007acc;
-                color: white;
+                background-color: #161b22;
+                color: #8b949e;
+                border-top: 1px solid #30363d;
                 font-size: 11px;
+            }
+            QSplitter::handle { background: #21262d; }
+            QSplitter::handle:hover { background: #2f81f7; }
+            QToolTip {
+                color: #e6edf3;
+                background: #161b22;
+                border: 1px solid #30363d;
+                padding: 5px;
             }
         """)
 
@@ -64,14 +95,18 @@ class MainWindow(QMainWindow):
         self.server_panel.disconnect_requested.connect(self._on_disconnect)
 
         self.terminal = TerminalWidget()
+        self.terminal.command_executed.connect(self._on_command_executed)
 
         self.status_panel = StatusPanel()
 
         splitter.addWidget(self.server_panel)
         splitter.addWidget(self.terminal)
         splitter.addWidget(self.status_panel)
-        splitter.setSizes([220, 780, 400])
-        splitter.setHandleWidth(2)
+        splitter.setSizes([210, 760, 310])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setHandleWidth(4)
 
         self.setCentralWidget(splitter)
 
@@ -101,6 +136,63 @@ class MainWindow(QMainWindow):
         chat_action = QAction("🤖 Agent Chat（MCP 工具链测试）", self)
         chat_action.triggered.connect(self._open_chat)
         tools_menu.addAction(chat_action)
+
+        clear_logs_action = QAction("清空操作日志", self)
+        clear_logs_action.triggered.connect(self._clear_logs)
+        tools_menu.addAction(clear_logs_action)
+
+    def _setup_toolbar(self):
+        toolbar = QToolBar("快捷工具", self)
+        toolbar.setObjectName("mainToolbar")
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        toolbar.setStyleSheet("""
+            QToolBar#mainToolbar {
+                background: #0d1117;
+                border: none;
+                border-bottom: 1px solid #21262d;
+                spacing: 5px;
+                padding: 5px 8px;
+            }
+            QToolButton {
+                color: #c9d1d9;
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            QToolButton:hover { background: #21262d; border-color: #30363d; }
+            QToolButton:pressed { background: #30363d; }
+        """)
+
+        refresh = QAction("刷新服务器", self)
+        refresh.setToolTip("重新读取服务器配置")
+        refresh.triggered.connect(self._load_servers)
+        toolbar.addAction(refresh)
+
+        clear_terminal = QAction("清空终端", self)
+        clear_terminal.setToolTip("清空当前终端的可见内容")
+        clear_terminal.triggered.connect(self.terminal.clear_terminal)
+        toolbar.addAction(clear_terminal)
+
+        clear_logs = QAction("清空日志", self)
+        clear_logs.setToolTip("清空右侧可见操作日志，不删除审计文件")
+        clear_logs.triggered.connect(self._clear_logs)
+        toolbar.addAction(clear_logs)
+
+        toolbar.addSeparator()
+        agent = QAction("Agent", self)
+        agent.setToolTip("打开内置 Agent 工具链测试窗口")
+        agent.triggered.connect(self._open_chat)
+        toolbar.addAction(agent)
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+    def _clear_logs(self):
+        self.status_panel.clear_logs()
+        self.status_bar.showMessage("已清空窗口日志；磁盘审计记录未删除", 3000)
+
+    def _on_command_executed(self, command: str, result: dict):
+        self.status_panel.log_command(command, result.get("exit_code"))
 
     # ------------------------------------------------------------------
     # 服务器列表
@@ -141,7 +233,11 @@ class MainWindow(QMainWindow):
     def _on_connected(self, result: dict, user: str, host: str):
         if result["status"] == "success":
             self._session_id = result["session_id"]
-            self.terminal.set_session(self._session_id, user, host)
+            display_host = result.get("remote_hostname") or host
+            current_dir = result.get("current_dir") or "~"
+            self.terminal.set_session(
+                self._session_id, user, display_host, current_dir
+            )
             self.server_panel.set_connected(
                 self._session_id, self._session_id
             )
@@ -353,7 +449,10 @@ class MainWindow(QMainWindow):
         else:
             request.finish({"status": "error", "message": f"未知 GUI IPC 方法: {method}"})
             return
-        self._bridge.submit_async(coro, callback)
+        if method == "terminal_write":
+            self._bridge.submit_realtime(coro, callback)
+        else:
+            self._bridge.submit_async(coro, callback)
 
     def _finish_ipc_connect(self, request, result, user, host):
         self._on_connected(result, user, host)
@@ -373,7 +472,12 @@ class MainWindow(QMainWindow):
             request.finish({"status": "error", "message": f"SSH 会话不存在或未连接: {session_id}"})
             return
         self._session_id = session_id
-        self.terminal.set_session(session_id, info.get("user", ""), info.get("host", ""))
+        self.terminal.set_session(
+            session_id,
+            info.get("user", ""),
+            info.get("remote_hostname") or info.get("host", ""),
+            info.get("current_dir") or "~",
+        )
         self.server_panel.set_connected(session_id, session_id)
         self.status_bar.showMessage(f"当前会话: {session_id}")
         if hasattr(self, "_chat_window") and self._chat_window is not None:
@@ -383,6 +487,19 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 关闭
     # ------------------------------------------------------------------
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._shown_once:
+            return
+        self._shown_once = True
+        self.setWindowOpacity(0.0)
+        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_animation.setDuration(220)
+        self._fade_animation.setStartValue(0.0)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade_animation.start()
 
     def closeEvent(self, event):
         if SSHManager().list_sessions().get("count", 0):

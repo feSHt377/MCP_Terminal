@@ -22,13 +22,14 @@ class StatusPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        self.setStyleSheet("background:#0d1117;")
 
         # ---- 标题 ----
         title = QLabel("  📋 操作日志")
         title.setFont(QFont("", 11, QFont.Bold))
-        title.setStyleSheet("color: #cccccc; padding: 8px 0 4px 0;")
+        title.setStyleSheet("color:#e6edf3;padding:6px 2px;font-weight:600;")
         layout.addWidget(title)
 
         # ---- 日志区域 ----
@@ -38,17 +39,18 @@ class StatusPanel(QWidget):
         self.log_view.setFont(QFont("Consolas, monospace", 9))
         self.log_view.setStyleSheet("""
             QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: none;
-                padding: 4px;
+                background:#010409;
+                color:#c9d1d9;
+                border:1px solid #30363d;
+                border-radius:8px;
+                padding:8px;
             }
         """)
         layout.addWidget(self.log_view, stretch=1)
 
         # ---- 统计 ----
         self.stats_label = QLabel("  会话: 0  |  命令: 0")
-        self.stats_label.setStyleSheet("color: #808080; font-size: 11px; padding: 4px 0;")
+        self.stats_label.setStyleSheet("color:#8b949e;font-size:11px;padding:4px 2px;")
         layout.addWidget(self.stats_label)
 
     # ------------------------------------------------------------------
@@ -87,6 +89,10 @@ class StatusPanel(QWidget):
     def update_stats(self, sessions: int, commands: int):
         """更新统计信息。"""
         self.stats_label.setText(f"  会话: {sessions}  |  命令: {commands}")
+
+    def clear_logs(self):
+        """清空当前窗口中的操作日志，不删除磁盘审计日志。"""
+        self.log_view.clear()
 
     # ------------------------------------------------------------------
     # 内部
