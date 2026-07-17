@@ -27,3 +27,6 @@ env/
 Thumbs.db
 .DS_Store
 .runtime/
+
+# 模板目录
+Template/
