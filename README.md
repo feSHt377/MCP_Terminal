@@ -83,7 +83,7 @@ MCP Server 通过 stdio 与 AI Agent 通信，不在握手期间联网安装依�
 
 ## MCP 工具集
 
-mcpterminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用：
+MCP Terminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用：
 
 ### 终端控制
 
@@ -138,25 +138,60 @@ mcpterminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用：
 
 ## 使用方式
 
-### 方式一：AI Agent 通过 MCP 调用
+### 方式一：接入外部 AI Agent（MCP 协议）
 
-配置 AI Agent（Codex CLI / Claude Code）的 MCP Client，指向 mcpterminal：
+MCP Terminal 本质上是一个 MCP Tool Server，任何支持 MCP 的 Agent 都可以接入。
+
+#### VS Code / GitHub Copilot
+
+在项目根目录创建 `.vscode/mcp.json`（`setup.ps1` 安装完成后会自动提示）：
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "mcpterminal": {
-      "command": "python",
+      "type": "stdio",
+      "command": ".venv\\Scripts\\python.exe",
       "args": ["-m", "app.main", "--mcp"]
     }
   }
 }
 ```
 
-Agent 即可通过自然语言调用所有工具，如：
+> macOS / Linux 将 `command` 改为 `.venv/bin/python`。
 
-> "帮我查看服务器的 GPU 状态"
-> "上传本地文件到远程 /tmp 目录"
+#### Claude Desktop
+
+编辑 `claude_desktop_config.json`（Windows: `%APPDATA%\Claude\`，macOS: `~/Library/Application Support/Claude/`）：
+
+```json
+{
+  "mcpServers": {
+    "mcpterminal": {
+      "command": ".venv\\Scripts\\python.exe",
+      "args": ["-m", "app.main", "--mcp"]
+    }
+  }
+}
+```
+
+#### 其他 MCP Client
+
+任何遵循 MCP stdio 协议的客户端，只需配置：
+
+- **command**: `.venv\Scripts\python.exe`（或 `.venv/bin/python`）
+- **args**: `["-m", "app.main", "--mcp"]`
+
+Agent 接入后即可通过自然语言调用所有工具，如：
+
+> "帮我查看服务器的 GPU 状态"  →  Agent 调用 `ssh_exec(nvidia-smi)`
+> "上传本地文件到远程 /tmp 目录"  →  Agent 调用 `upload_file(...)`
+
+#### 模型无关性
+
+MCP Terminal 通过标准 MCP 协议暴露工具，不依赖任何特定模型或 Agent 实现。
+无论你使用 GPT-4、Claude Sonnet、Gemini、Qwen、DeepSeek，
+还是本地 Ollama 部署的开源模型，只要 Agent 框架支持 MCP，即可无缝接入。
 
 ### 方式二：内置 Agent（自然语言 → 工具调用）
 
@@ -167,11 +202,12 @@ GUI 内置聊天窗口，支持直接输入自然语言指令：
 
 ### 方式三：人工操作 GUI
 
-直接通过 GUI 界面连接服务器、执行命令、传输文件，所有操作对 AI Agent 可见。
+直接通过 GUI 界面连接服务器、执行命令、传输文件。
+所有操作对 AI Agent 可见，人类可随时监控、干预和接管。
 
 ## 为什么不是 Agent？
 
-| 组件 | mcpterminal | AI Agent |
+| 组件 | MCP Terminal | AI Agent |
 |------|:-----------:|:--------:|
 | 推理 (Reasoning) | ❌ | ✅ |
 | 规划 (Planning) | ❌ | ✅ |
@@ -180,8 +216,7 @@ GUI 内置聊天窗口，支持直接输入自然语言指令：
 | 执行 (Execution) | ✅ | ✅ |
 | 反馈循环 (Feedback Loop) | ❌ | ✅ |
 
-mcpterminal 是 **Agent Runtime / Agent Tool Infrastructure**，提供 Agent 所需的执行层能力。
-加上推理和规划层（Codex/Claude）后，才构成完整的 Agent 系统。
+MCP Terminal 是 **Agent Runtime / Agent Tool Infrastructure**，为任意 Agent 提供统一的执行层能力。
 
 ## 演进路线
 
@@ -235,7 +270,7 @@ mcpterminal/
 | **GUI** | PySide6 |
 | **SSH** | asyncssh / paramiko |
 | **AI 协议** | MCP (Model Context Protocol) / FastMCP |
-| **AI 后端** | Codex CLI / Claude Code（MCP Client） |
+| **AI 后端** | 任意支持 MCP 的 Agent（Copilot / Claude / Codex / 自定义 Agent） |
 | **LLM** | OpenAI 兼容 API（Function Calling） |
 | **IPC** | 本地回环 JSON-RPC |
 | **数据库** | SQLite |
