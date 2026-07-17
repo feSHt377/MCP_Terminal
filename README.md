@@ -1,10 +1,15 @@
-# mcpterminal — MCP 远程终端 / AI Agent 执行基础设施
+# MCP Terminal — 通用 Agent 远程执行基础设施
 
-> **定位：Agent 的手和脚，不是大脑。**
+> **定位：任意 Agent 的手和脚，不是大脑。**
 >
-> mcpterminal 为 AI Agent（Codex、Claude Code 等）提供可靠的远程服务器执行环境。
-> 它是一个 MCP Tool Server，将 SSH 终端能力暴露为标准化工具，
-> 让 AI 可以操作远程服务器，同时保留人类的实时观察、干预和接管能力。
+> MCP Terminal 是一个基于 MCP 协议的通用执行层基础设施，为任何 AI Agent 提供可靠的远程服务器操作能力。
+> 它将 SSH 终端能力暴露为标准化工具，通过 MCP 协议与 Agent 通信，
+> 理论上兼容任何遵循 MCP 规范的 Agent——无论其底层模型是 GPT、Claude、Gemini、Qwen，还是本地部署的开源模型。
+>
+> **核心理念：人在回路（Human-in-the-Loop）**
+>
+> 人类不是旁观者，而是整个执行链路的监督者、决策者和最终接管者。
+> MCP Terminal 确保人类始终拥有对远程操作的实时可见性、干预能力和完全控制权。
 
 ## 架构总览
 
