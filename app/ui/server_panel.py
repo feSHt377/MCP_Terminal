@@ -87,9 +87,11 @@ class ServerPanel(QWidget):
         layout.addWidget(self.status_label)
 
     def load_servers(self, servers: dict):
-        """从配置加载服务器列表。"""
+        """从配置加载服务器列表，跳过 hide: true 的服务器。"""
         self.list_widget.clear()
         for name, info in servers.items():
+            if info.get("hide") is True:
+                continue
             item = QListWidgetItem(f"  {name}\n  {info['user']}@{info['host']}:{info.get('port', 22)}")
             item.setData(Qt.UserRole, name)
             self.list_widget.addItem(item)

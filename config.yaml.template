@@ -11,6 +11,7 @@ servers:
     host: <your-server-ip>
     port: 22
     user: <your-username>
+    # hide: true            # 设为 true 则在 UI 中隐藏该服务器
     # key_path: ~/.ssh/id_rsa   # SSH 私钥（与 password 二选一）
     password: <your-password>   # 密码（不推荐明文存储，建议使用 key_path）
 
