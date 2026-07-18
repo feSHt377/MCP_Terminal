@@ -34,3 +34,6 @@ Thumbs.db
 
 # 模板目录
 Template/
+
+# 配置文件（含敏感信息，仅保留模板）
+config.yaml
