@@ -138,6 +138,47 @@ async def _call_gui_async(method: str, params: dict[str, Any]) -> dict[str, Any]
 # 工具: SSH 连接
 # ------------------------------------------------------------------
 
+def _resolve_server_credentials(
+    host: str,
+    user: str,
+    port: int,
+    password: str | None,
+    key_path: str | None,
+) -> dict[str, Any] | None:
+    """从 config.yaml 按主机名解析登录凭据。
+
+    显式提供了 password/key_path 时直接使用；否则查找配置中与该主机匹配的
+    服务器，取最近添加（匹配列表最后一个）的账号填充凭据。
+    未匹配到配置且无凭据时返回 None，由调用方提示模型向用户索要。
+    """
+    if password or key_path:
+        return {
+            "user": user,
+            "port": port,
+            "password": password,
+            "key_path": key_path,
+            "account": None,
+        }
+
+    servers = get_servers()
+    matches = [
+        (name, info)
+        for name, info in servers.items()
+        if isinstance(info, dict) and info.get("host") == host
+    ]
+    if not matches:
+        return None
+
+    name, info = matches[-1]
+    return {
+        "user": info.get("user") or user,
+        "port": info.get("port") or port,
+        "password": info.get("password"),
+        "key_path": info.get("key_path"),
+        "account": name,
+    }
+
+
 @mcp.tool()
 async def ssh_connect(
     host: str,
@@ -148,20 +189,51 @@ async def ssh_connect(
 ) -> dict[str, Any]:
     """建立到远程服务器的 SSH 连接。
 
+    password 与 key_path 均可省略：若 config.yaml 已配置该主机，将自动使用其中
+    最近添加的一个账号登录。若配置中没有该主机且未提供凭据，返回结果会提示你
+    向用户索取 password 或 key_path 后再调用。
+
     连接建立后返回 session_id，后续所有操作都需要传入该 ID。
 
     Args:
         host: 服务器 IP 地址或主机名。
         user: SSH 登录用户名，默认 root。
         port: SSH 端口，默认 22。
-        password: SSH 密码（与 key_path 二选一）。
-        key_path: SSH 私钥路径（与 password 二选一）。
+        password: SSH 密码（与 key_path 二选一，可省略由配置自动填充）。
+        key_path: SSH 私钥路径（与 password 二选一，可省略由配置自动填充）。
     """
+    creds = _resolve_server_credentials(host, user, port, password, key_path)
+    if creds is None:
+        message = (
+            f"config.yaml 中没有 {host} 的服务器配置，且未提供登录凭据。"
+            "请向用户询问该服务器的 SSH 密码（password）或私钥路径（key_path），"
+            "然后再调用 ssh_connect。"
+        )
+        _log_call(
+            "ssh_connect",
+            {"host": host, "user": user, "port": port},
+            {"status": "error", "message": message},
+        )
+        return {
+            "status": "error",
+            "message": message,
+            "reason": "credentials_required",
+        }
+
     result = await _call_gui_async("ssh_connect", {
-        "host": host, "user": user, "port": port,
-        "password": password, "key_path": key_path,
+        "host": host,
+        "user": creds["user"],
+        "port": creds["port"],
+        "password": creds["password"],
+        "key_path": creds["key_path"],
     })
-    _log_call("ssh_connect", {"host": host, "user": user, "port": port}, result)
+    if creds.get("account"):
+        result = {**result, "config_account": creds["account"]}
+    _log_call(
+        "ssh_connect",
+        {"host": host, "user": creds["user"], "port": creds["port"]},
+        result,
+    )
     return result
 
 

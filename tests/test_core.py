@@ -376,6 +376,7 @@ def test_mcp_tools_sync_call():
         list_servers,
         list_sessions,
         get_dangerous_commands,
+        _resolve_server_credentials,
     )
 
     # list_servers
@@ -383,6 +384,16 @@ def test_mcp_tools_sync_call():
     assert r["status"] == "success"
     assert "servers" in r
     print(f"  ✅ list_servers() → {r['count']} 台")
+
+    # ssh_connect 凭据解析：config 中有该主机时自动取最近账号，否则提示索要
+    c1 = _resolve_server_credentials("139.224.250.35", "root", 22, None, None)
+    assert c1 is not None and c1["account"] == "Aliyun-Server" and c1["password"]
+    c2 = _resolve_server_credentials("100.64.0.13", "root", 22, None, None)
+    assert c2 is not None and c2["user"] == "fuzihan" and c2["password"]
+    assert _resolve_server_credentials("1.2.3.4", "root", 22, None, None) is None
+    c3 = _resolve_server_credentials("1.2.3.4", "root", 22, "pw", None)
+    assert c3 is not None and c3["password"] == "pw" and c3["account"] is None
+    print("  ✅ ssh_connect 凭据解析（自动取配置账号 / 缺失时提示索要）")
 
     # list_sessions
     r = list_sessions()
