@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -18,6 +19,49 @@ from typing import Any, Callable
 import asyncssh
 
 logger = logging.getLogger("mcpterminal.ssh")
+
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
+_SHELL_PROMPT_RE = re.compile(
+    r"(?:^|[\r\n])(?:[^\r\n]{1,240}[#$]|[^\r\n]{0,220}(?:>>>|\.\.\.|[A-Za-z][\w.-]*>))\s*$"
+)
+
+
+def looks_like_shell_prompt(text: str) -> bool:
+    """识别 PTY 输出末尾的普通 Bash/Zsh 风格提示符。"""
+    visible = _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", text))
+    return bool(_SHELL_PROMPT_RE.search(visible))
+
+
+def _strip_trailing_prompt(text: str) -> str:
+    """去掉文本末尾的 Shell 提示符，保留其余内容。"""
+    m = _SHELL_PROMPT_RE.search(text)
+    if m:
+        return text[: m.start()]
+    return text
+
+
+def _strip_command_echo(text: str, command: str) -> str:
+    """去掉 PTY 回显的命令行（提示符 + 命令 + 换行），保留命令输出。
+
+    某些客户端会多次回显同一条命令（如 docker 对 exit 的二次回显），
+    这里循环剥离所有行首回显。
+    """
+    if not command:
+        return text
+    idx = text.find(command)
+    while idx != -1:
+        after = idx + len(command)
+        nl = text.find("\n", after)
+        new = text[nl + 1 :] if nl != -1 else text[after:]
+        if new == text:
+            break
+        text = new
+        m = re.match(r"[\r\n]*" + re.escape(command), text)
+        if m is None:
+            break
+        idx = m.start()
+    return text
 
 
 @dataclass
@@ -31,6 +75,10 @@ class SSHSession:
     conn: asyncssh.SSHClientConnection | None = None
     shell: asyncssh.SSHClientProcess | None = None
     active_process: asyncssh.SSHClientProcess | None = None
+    interactive_ready: bool = False
+    interactive_out: list[str] = field(default_factory=list)
+    interactive_prompt_count: int = 0
+    interactive_read_offset: int = 0
     remote_hostname: str = ""
     current_dir: str = "~"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -170,6 +218,8 @@ class SSHManager:
         try:
             if session.active_process is not None:
                 session.active_process.terminate()
+                session.active_process = None
+            session.interactive_ready = False
             if session.shell is not None:
                 session.shell.close()
             if session.conn is not None:
@@ -236,6 +286,8 @@ class SSHManager:
         command: str,
         timeout: float = 30.0,
         on_output: Callable[[str, bool], None] | None = None,
+        interactive: bool | None = None,
+        on_exit: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """在 PTY 中执行命令并增量推送输出。
 
@@ -247,12 +299,22 @@ class SSHManager:
         if session is None or session.conn is None:
             return {"status": "error", "message": f"会话不存在或未连接: {session_id}"}
         if session.active_process is not None:
+            if session.interactive_ready:
+                # 交互式 Shell 已就绪：把命令注入其中执行，避免被队列卡死。
+                return await self._exec_inside_interactive(
+                    session, command, timeout, on_output
+                )
             return {"status": "error", "message": f"会话已有运行中的命令: {session_id}"}
 
         session.touch()
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         process: asyncssh.SSHClientProcess | None = None
+        output_ready = asyncio.Event()
+        detached = False
+        session.interactive_out = stdout_parts
+        session.interactive_prompt_count = 0
+        session.interactive_read_offset = 0
 
         async def _pump(stream, target: list[str], is_stderr: bool) -> None:
             while True:
@@ -261,6 +323,15 @@ class SSHManager:
                     break
                 text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
                 target.append(text)
+                prompt_hit = not is_stderr and looks_like_shell_prompt(
+                    "".join(target[-4:])
+                )
+                if prompt_hit and session.active_process is process:
+                    session.interactive_prompt_count += 1
+                if interactive is True:
+                    output_ready.set()
+                elif interactive is None and prompt_hit:
+                    output_ready.set()
                 if on_output is not None:
                     on_output(text, is_stderr)
 
@@ -280,17 +351,90 @@ class SSHManager:
                 )
                 await process.wait_closed()
 
+            def _completed_result() -> dict[str, Any]:
+                return {
+                    "status": "success",
+                    "session_id": session_id,
+                    "command": command,
+                    "stdout": "".join(stdout_parts),
+                    "stderr": "".join(stderr_parts),
+                    "exit_code": process.exit_status,
+                    "streamed": True,
+                    "interactive": False,
+                    "ready": False,
+                }
+
+            if interactive is not False:
+                async def _monitor_interactive() -> dict[str, Any]:
+                    try:
+                        await _run()
+                        result = _completed_result()
+                    except Exception as exc:
+                        result = {
+                            "status": "error",
+                            "session_id": session_id,
+                            "command": command,
+                            "message": str(exc),
+                            "streamed": True,
+                            "interactive": True,
+                            "ready": False,
+                        }
+                    finally:
+                        if session.active_process is process:
+                            session.active_process = None
+                            session.interactive_ready = False
+                    if detached and on_exit is not None:
+                        on_exit(result)
+                    return result
+
+                monitor = asyncio.create_task(_monitor_interactive())
+                ready_wait = asyncio.create_task(output_ready.wait())
+                done, _ = await asyncio.wait(
+                    {monitor, ready_wait},
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if monitor in done:
+                    ready_wait.cancel()
+                    return monitor.result()
+                if ready_wait in done:
+                    # 给快速失败留出一个很短的退出窗口，避免把错误首行当成就绪。
+                    await asyncio.sleep(0.15)
+                    if monitor.done():
+                        return monitor.result()
+                    detached = True
+                    session.interactive_ready = True
+                    return {
+                        "status": "success",
+                        "session_id": session_id,
+                        "command": command,
+                        "message": "交互式进程已就绪",
+                        "stdout": "".join(stdout_parts),
+                        "stderr": "".join(stderr_parts),
+                        "exit_code": None,
+                        "streamed": True,
+                        "interactive": True,
+                        "ready": True,
+                    }
+                monitor.cancel()
+                ready_wait.cancel()
+                process.terminate()
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "command": command,
+                    "message": (
+                        f"交互式进程在 {timeout:g} 秒内没有就绪"
+                        if interactive is True
+                        else f"命令超时 ({timeout:g}s): {command}"
+                    ),
+                    "streamed": True,
+                    "interactive": True,
+                    "ready": False,
+                }
+
             await asyncio.wait_for(_run(), timeout=timeout)
-            exit_code = process.exit_status
-            return {
-                "status": "success",
-                "session_id": session_id,
-                "command": command,
-                "stdout": "".join(stdout_parts),
-                "stderr": "".join(stderr_parts),
-                "exit_code": exit_code,
-                "streamed": True,
-            }
+            return _completed_result()
         except asyncio.TimeoutError:
             if process is not None:
                 try:
@@ -318,12 +462,100 @@ class SSHManager:
                 "streamed": True,
             }
         finally:
-            if session.active_process is process:
+            if interactive is False and session.active_process is process:
                 session.active_process = None
 
     # ------------------------------------------------------------------
     # 交互式终端
     # ------------------------------------------------------------------
+
+    async def _exec_inside_interactive(
+        self,
+        session: SSHSession,
+        command: str,
+        timeout: float = 30.0,
+        on_output: Callable[[str, bool], None] | None = None,
+    ) -> dict[str, Any]:
+        """把命令注入已就绪的交互式 Shell 执行，并等待其再次出现提示符。
+
+        用于 ``lxc exec xxx bash`` / ``docker exec -it xxx bash`` 等命令返回
+        ``interactive=True, ready=True`` 之后，Agent 继续用 ``ssh_exec`` 下发命令
+        时自动路由到当前活动进程，避免命令被串行队列永久卡死。
+        """
+        proc = session.active_process
+        if proc is None or not session.interactive_ready:
+            return {
+                "status": "error",
+                "message": "会话没有已就绪的交互式进程",
+                "interactive": False,
+                "ready": False,
+            }
+
+        loop = asyncio.get_running_loop()
+        base_len = sum(len(c) for c in session.interactive_out)
+        base_count = session.interactive_prompt_count
+        cmd = command.rstrip("\n")
+
+        try:
+            proc.stdin.write(cmd + "\n")
+            await proc.stdin.drain()
+        except Exception as exc:
+            return {
+                "status": "error",
+                "message": f"向交互式进程写入失败: {exc}",
+                "interactive": True,
+                "ready": False,
+            }
+
+        deadline = loop.time() + timeout
+        while True:
+            if session.active_process is not proc:
+                break
+            if session.interactive_prompt_count > base_count:
+                break
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+
+        raw = "".join(session.interactive_out)[base_len:]
+        visible = _ANSI_OSC_RE.sub("", raw)
+        visible = _ANSI_CSI_RE.sub("", visible)
+        stdout = _strip_command_echo(_strip_trailing_prompt(visible), cmd).strip()
+
+        if session.active_process is not proc:
+            return {
+                "status": "success",
+                "message": "交互式 Shell 已退出",
+                "stdout": stdout,
+                "stderr": "",
+                "exit_code": proc.exit_status if proc.exit_status is not None else 0,
+                "streamed": True,
+                "interactive": False,
+                "ready": False,
+            }
+        if session.interactive_prompt_count <= base_count:
+            return {
+                "status": "error",
+                "message": f"交互式命令超时 ({timeout:g}s): {command}",
+                "stdout": stdout,
+                "stderr": "",
+                "exit_code": None,
+                "streamed": True,
+                "interactive": True,
+                "ready": True,
+            }
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "command": command,
+            "stdout": stdout,
+            "stderr": "",
+            "exit_code": None,
+            "streamed": True,
+            "interactive": True,
+            "ready": True,
+            "message": "已在交互式 Shell 中执行",
+        }
 
     async def terminal_write(
         self, session_id: str, data: str
@@ -367,6 +599,24 @@ class SSHManager:
             return {"status": "error", "message": f"会话不存在或 shell 未打开: {session_id}"}
 
         session.touch()
+        if session.active_process is not None and session.interactive_ready:
+            # 交互式进程中，输出由持续 pump 累积，从这里按偏移读取。
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            while True:
+                if len("".join(session.interactive_out)) > session.interactive_read_offset:
+                    break
+                if loop.time() >= deadline:
+                    break
+                await asyncio.sleep(0.05)
+            full = "".join(session.interactive_out)
+            text = full[session.interactive_read_offset :]
+            session.interactive_read_offset = len(full)
+            session.output_buffer.append(text)
+            if len(session.output_buffer) > 100:
+                session.output_buffer = session.output_buffer[-100:]
+            return {"status": "success", "session_id": session_id, "output": text}
+
         try:
             data = await asyncio.wait_for(
                 session.shell.stdout.read(size),

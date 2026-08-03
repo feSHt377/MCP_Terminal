@@ -1,6 +1,7 @@
 """配置管理模块 — 加载和访问 config.yaml。"""
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,20 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _find_config() -> Path:
-    """查找 config.yaml，优先项目根目录。"""
+    """查找 config.yaml，若不存在则从模板复制。"""
     config_path = _PROJECT_ROOT / "config.yaml"
     if config_path.exists():
         return config_path
-    raise FileNotFoundError(f"未找到 config.yaml（已搜索: {config_path}）")
+
+    template_path = _PROJECT_ROOT / "config.yaml.template"
+    if template_path.exists():
+        shutil.copy2(template_path, config_path)
+        return config_path
+
+    raise FileNotFoundError(
+        f"未找到 config.yaml 且模板 config.yaml.template 也不存在"
+        f"（已搜索: {config_path}）"
+    )
 
 
 def load_config() -> dict[str, Any]:

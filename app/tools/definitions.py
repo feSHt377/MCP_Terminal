@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -186,21 +186,27 @@ async def ssh_exec(
     session_id: str,
     command: str,
     timeout: float = 30.0,
+    execution_mode: Literal["auto", "command", "interactive"] = "auto",
 ) -> dict[str, Any]:
     """在 GUI 当前 SSH 会话执行一条命令，返回 stdout/stderr 和退出码。
 
     一次只提交一条命令，等待并分析本次结果后再决定下一步；不要并行提交多个
     探测命令，也不要在未读取错误信息前用猜测的参数反复重试。
-    适合执行一次性命令，如 nvidia-smi、docker ps、ls 等。
-    如需交互式终端，请使用 terminal_write / terminal_read。
+    适合执行一次性命令，如 nvidia-smi、docker ps、ls 等；交互程序可将
+    execution_mode 设为 interactive，进入后使用 terminal_write 继续输入。
 
     Args:
         session_id: SSH 会话 ID。
         command: 要执行的 shell 命令。
         timeout: 命令超时秒数，默认 30。
+        execution_mode: auto 根据 PTY 运行状态判断；command 必须等待退出码；
+            interactive 在进程产生首段输出且仍存活时返回 ready=true。
     """
     result = await _call_gui_async("ssh_exec", {
-        "session_id": session_id, "command": command, "timeout": timeout,
+        "session_id": session_id,
+        "command": command,
+        "timeout": timeout,
+        "execution_mode": execution_mode,
     })
     _log_call("ssh_exec", {"session_id": session_id, "command": command}, result)
     return result
@@ -215,6 +221,8 @@ async def terminal_write(session_id: str, data: str) -> dict[str, Any]:
     """向交互式 SSH shell 写入数据。
 
     通常需要以 \\n 结尾来执行命令。配合 terminal_read 使用可实现交互式操作。
+    当 proxy_command/ssh_exec 返回 interactive=true、ready=true 时，使用本工具继续
+    向该活动进程输入；Shell 通常可用 exit\\n 退出并恢复普通命令模式。
 
     Args:
         session_id: SSH 会话 ID。
@@ -320,13 +328,24 @@ def list_sessions() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def proxy_command(command: str, timeout: float = 30.0) -> dict[str, Any]:
+async def proxy_command(
+    command: str,
+    timeout: float = 30.0,
+    execution_mode: Literal["auto", "command", "interactive"] = "auto",
+) -> dict[str, Any]:
     """在 GUI 当前会话代理执行一条命令，并把过程显示在人工终端。
 
     必须等待本次结果并根据 stdout/stderr 决定下一步。不要并行调用本工具，也不要
     在尚未分析错误原因时连续尝试多个相似命令。并发到达的少量命令会被串行排队。
+    execution_mode 可为 auto、command 或 interactive。对任意已知会长期等待输入的
+    程序使用 interactive；返回 interactive=true、ready=true 且没有 exit_code 属于
+    正常状态，后续输入应改用 terminal_write。auto 会依据 PTY 提示符和进程生命周期判断。
     """
-    result = await _call_gui_async("proxy_command", {"command": command, "timeout": timeout})
+    result = await _call_gui_async("proxy_command", {
+        "command": command,
+        "timeout": timeout,
+        "execution_mode": execution_mode,
+    })
     _log_call("proxy_command", {"command": command}, result)
     return result
 

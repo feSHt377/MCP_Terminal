@@ -203,6 +203,7 @@ class TerminalWidget(QWidget):
 
     command_executed = Signal(str, object)
     stream_received = Signal(str, bool)
+    interactive_finished = Signal(object)
     MAX_AGENT_QUEUE = 5
 
     def __init__(self, parent=None):
@@ -214,11 +215,14 @@ class TerminalWidget(QWidget):
         self._history: list[str] = []
         self._history_index = -1
         self._busy = False
+        self._interactive_mode = False
+        self._interactive_busy = False
         self._result_callback = None
         self._active_command = ""
         self._pending_commands = deque()
         self._setup_ui()
         self.stream_received.connect(self._on_stream_received)
+        self.interactive_finished.connect(self._on_interactive_finished)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -335,9 +339,20 @@ class TerminalWidget(QWidget):
             self.output.replace_input("")
 
     def execute_command(
-        self, cmd: str, on_done=None, source: str = "Agent", timeout: float = 30.0
+        self,
+        cmd: str,
+        on_done=None,
+        source: str = "Agent",
+        timeout: float = 30.0,
+        execution_mode: str = "auto",
     ) -> dict:
-        return self._execute(cmd, on_done=on_done, source=source, timeout=timeout)
+        return self._execute(
+            cmd,
+            on_done=on_done,
+            source=source,
+            timeout=timeout,
+            execution_mode=execution_mode,
+        )
 
     def set_input_text(self, text: str) -> None:
         self.input.setText(text)
@@ -369,11 +384,20 @@ class TerminalWidget(QWidget):
         source: str = "Human",
         timeout: float = 30.0,
         display_echo: bool = True,
+        execution_mode: str = "auto",
     ) -> dict:
         sid = self._session_id
         if not sid:
             result = {"status": "error", "message": "GUI 当前没有 SSH 会话"}
             self._append_output("⚠ 未连接到任何服务器\n", "#f0883e")
+            if on_done:
+                on_done(result)
+            return result
+        if execution_mode not in {"auto", "command", "interactive"}:
+            result = {
+                "status": "error",
+                "message": f"未知 execution_mode: {execution_mode}",
+            }
             if on_done:
                 on_done(result)
             return result
@@ -384,6 +408,27 @@ class TerminalWidget(QWidget):
                 if on_done:
                     on_done(result)
                 return result
+            if self._interactive_mode:
+                # 交互式 Shell 已就绪：新命令直接注入其中执行，不再排队阻塞。
+                if self._interactive_busy:
+                    if len(self._pending_commands) >= self.MAX_AGENT_QUEUE:
+                        result = {
+                            "status": "error",
+                            "message": f"Agent 命令队列已满（最多 {self.MAX_AGENT_QUEUE} 条）",
+                        }
+                        if on_done:
+                            on_done(result)
+                        return result
+                    self._pending_commands.append(
+                        (text, on_done, source, timeout, sid, display_echo, execution_mode)
+                    )
+                    position = len(self._pending_commands)
+                    self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#d29922")
+                    return {"status": "queued", "position": position}
+                self._start_execute(
+                    text, on_done, source, timeout, sid, display_echo, execution_mode
+                )
+                return {"status": "running"}
             if len(self._pending_commands) >= self.MAX_AGENT_QUEUE:
                 result = {
                     "status": "error",
@@ -392,15 +437,28 @@ class TerminalWidget(QWidget):
                 if on_done:
                     on_done(result)
                 return result
-            self._pending_commands.append((text, on_done, source, timeout, sid, display_echo))
+            self._pending_commands.append(
+                (text, on_done, source, timeout, sid, display_echo, execution_mode)
+            )
             position = len(self._pending_commands)
             self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#d29922")
             return {"status": "queued", "position": position}
 
-        self._start_execute(text, on_done, source, timeout, sid, display_echo)
+        self._start_execute(
+            text, on_done, source, timeout, sid, display_echo, execution_mode
+        )
         return {"status": "running"}
 
-    def _start_execute(self, text, on_done, source, timeout, sid, display_echo=True) -> None:
+    def _start_execute(
+        self,
+        text,
+        on_done,
+        source,
+        timeout,
+        sid,
+        display_echo=True,
+        execution_mode="auto",
+    ) -> None:
         self._history.append(text)
         self._history_index = len(self._history)
         if display_echo:
@@ -410,6 +468,7 @@ class TerminalWidget(QWidget):
         self.input.clear()
         self.input.setEnabled(False)
         self._busy = True
+        self._interactive_busy = self._interactive_mode
         self.activity.setVisible(True)
         prompt = self._prompt_text()
         self.output.set_terminal_state(True, True, prompt)
@@ -425,9 +484,23 @@ class TerminalWidget(QWidget):
         def _stream(text_chunk: str, is_stderr: bool) -> None:
             self.stream_received.emit(text_chunk, is_stderr)
 
+        interactive = {
+            "auto": None,
+            "command": False,
+            "interactive": True,
+        }[execution_mode]
+
+        def _interactive_exit(result: dict) -> None:
+            self.interactive_finished.emit(result)
+
         async def _exec():
             return await manager.exec_command_stream(
-                sid, text, timeout=timeout, on_output=_stream
+                sid,
+                text,
+                timeout=timeout,
+                on_output=_stream,
+                interactive=interactive,
+                on_exit=_interactive_exit,
             )
 
         SSHBridge().submit_async(_exec(), self._on_result)
@@ -436,7 +509,26 @@ class TerminalWidget(QWidget):
         self._append_output(text, "#ff7b72" if is_stderr else "#c9d1d9", dynamic=True)
 
     def _on_result(self, result: dict) -> None:
+        if result.get("interactive") and result.get("ready"):
+            self._interactive_mode = True
+            self._interactive_busy = False
+            self.activity.setVisible(False)
+            callback = self._result_callback
+            command = self._active_command
+            self._result_callback = None
+            self._active_command = ""
+            if callback:
+                callback(result)
+            self.command_executed.emit(command, result)
+            if self._pending_commands:
+                QTimer.singleShot(0, self._run_next)
+            else:
+                self.output.setFocus()
+            return
+
         self._busy = False
+        self._interactive_mode = False
+        self._interactive_busy = False
         self.activity.setVisible(False)
 
         if not result.get("streamed"):
@@ -466,17 +558,55 @@ class TerminalWidget(QWidget):
             self.output.replace_input("")
             self.output.setFocus()
 
+    def _on_interactive_finished(self, result: dict) -> None:
+        """嵌套 Shell 输入 exit/EOF 后恢复普通命令模式。"""
+        if not self._interactive_mode:
+            return
+        self._interactive_mode = False
+        self._busy = False
+        self._interactive_busy = False
+        exit_code = result.get("exit_code")
+        if result.get("status") == "error":
+            self._append_output(f"\n❌ {result.get('message', '交互式 Shell 已断开')}\n", "#ff7b72")
+        elif exit_code not in (None, 0):
+            self._append_output(f"\n[interactive exit {exit_code}]\n", "#d29922")
+
+        if self._pending_commands:
+            QTimer.singleShot(0, self._run_next)
+        else:
+            self.input.setEnabled(bool(self._session_id))
+            prompt = self._prompt_text()
+            self.output.set_terminal_state(bool(self._session_id), False, prompt)
+            self.output.replace_input("")
+            self.output.setFocus()
+
     def _run_next(self) -> None:
-        if self._busy:
+        if self._busy and not (self._interactive_mode and not self._interactive_busy):
             return
         while self._pending_commands:
-            text, on_done, source, timeout, sid, display_echo = self._pending_commands.popleft()
+            (
+                text,
+                on_done,
+                source,
+                timeout,
+                sid,
+                display_echo,
+                execution_mode,
+            ) = self._pending_commands.popleft()
             if sid != self._session_id:
                 result = {"status": "error", "message": f"排队期间当前会话已切换: {sid}"}
                 if on_done:
                     on_done(result)
                 continue
-            self._start_execute(text, on_done, source, timeout, sid, display_echo)
+            self._start_execute(
+                text,
+                on_done,
+                source,
+                timeout,
+                sid,
+                display_echo,
+                execution_mode,
+            )
             return
 
     def _send_raw_input(self, data: str) -> None:

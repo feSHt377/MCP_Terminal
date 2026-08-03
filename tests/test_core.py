@@ -143,7 +143,7 @@ def test_ssh_manager_sync():
 
 async def _test_ssh_manager_async_inner():
     """异步测试（不需要真实 SSH 服务器）。"""
-    from app.ssh.manager import SSHManager
+    from app.ssh.manager import SSHManager, SSHSession
 
     m = SSHManager()
 
@@ -180,6 +180,120 @@ async def _test_ssh_manager_async_inner():
     from app.ui.terminal_widget import strip_terminal_control
     assert strip_terminal_control("\x1b[31mred\x1b[0m") == "red"
     print("  ✅ ANSI 终端控制码清理")
+
+    from app.ssh.manager import looks_like_shell_prompt
+    assert looks_like_shell_prompt("root@ft3:~# ")
+    assert looks_like_shell_prompt("\x1b[32mfuzihan@workstation\x1b[0m:~$ ")
+    assert looks_like_shell_prompt("Python 3.14\n>>> ")
+    assert looks_like_shell_prompt("mysql> ")
+    assert not looks_like_shell_prompt("Error: Instance not found\n")
+    print("  ✅ auto 模式按 PTY 提示符识别，不依赖命令白名单")
+
+    # 伪 PTY：提示符返回后工具应立即成功，后台进程继续接受输入直到退出。
+    finished = asyncio.Event()
+    exit_results = []
+
+    class _Writer:
+        def __init__(self):
+            self.data = []
+            self.awaiting_read = asyncio.Event()
+
+        def write(self, data):
+            self.data.append(data)
+            self.awaiting_read.set()
+
+        async def drain(self):
+            return None
+
+    class _PromptReader:
+        def __init__(self, writer):
+            self.first = True
+            self.responded = False
+            self.writer = writer
+
+        async def read(self, _size):
+            if self.first:
+                self.first = False
+                return "root@ft3:~# "
+            if not self.responded:
+                await self.writer.awaiting_read.wait()
+                self.responded = True
+                return "root@ft3:~# echo hi\r\nhi\r\nroot@ft3:~# "
+            await finished.wait()
+            return ""
+
+    class _EmptyReader:
+        async def read(self, _size):
+            return ""
+
+    class _Process:
+        def __init__(self):
+            self.stdin = _Writer()
+            self.stdout = _PromptReader(self.stdin)
+            self.stderr = _EmptyReader()
+            self.exit_status = 0
+
+        async def wait_closed(self):
+            await finished.wait()
+
+        def terminate(self):
+            finished.set()
+
+        def kill(self):
+            finished.set()
+
+    process = _Process()
+
+    class _Connection:
+        async def create_process(self, *_args, **_kwargs):
+            return process
+
+    fake_sid = "root@fake:22"
+    m._sessions[fake_sid] = SSHSession(
+        session_id=fake_sid,
+        host="fake",
+        conn=_Connection(),
+        shell=process,
+    )
+    ready = await m.exec_command_stream(
+        fake_sid,
+        "lxc exec ft3 bash",
+        timeout=1.0,
+        interactive=True,
+        on_exit=exit_results.append,
+    )
+    assert ready["status"] == "success" and ready["ready"] is True
+    assert m._sessions[fake_sid].active_process is process
+
+    # 交互式进程就绪后，后续 ssh_exec 命令自动注入其中执行，而不是被队列卡死。
+    routed = await m.exec_command_stream(fake_sid, "echo hi", timeout=1.0)
+    assert routed["status"] == "success"
+    assert routed["interactive"] is True and routed["ready"] is True
+    assert routed["stdout"] == "hi"
+    assert process.stdin.data == ["echo hi\n"]
+    print("  ✅ 交互式 Shell 就绪后，新命令自动注入执行（不再卡队列）")
+
+    written = await m.terminal_write(fake_sid, "exit\n")
+    assert written["target"] == "active_process"
+    assert process.stdin.data == ["echo hi\n", "exit\n"]
+    finished.set()
+    for _ in range(20):
+        if exit_results:
+            break
+        await asyncio.sleep(0.01)
+    assert exit_results and exit_results[0]["exit_code"] == 0
+    assert m._sessions[fake_sid].active_process is None
+    m._sessions.pop(fake_sid)
+    print("  ✅ 交互式 Shell 就绪后立即返回并保持可输入")
+
+    # 提示符/回显清理辅助函数
+    from app.ssh.manager import _strip_command_echo, _strip_trailing_prompt
+    stripped = _strip_trailing_prompt("root@ft3:~# echo hi\r\nhi\r\nroot@ft3:~# ")
+    assert not stripped.endswith("root@ft3:~# ")
+    assert _strip_command_echo(stripped, "echo hi").strip("\r\n") == "hi"
+    # docker 对 exit 等命令会二次回显
+    assert _strip_command_echo("exit\r\n\rexit\r\n", "exit").strip() == ""
+    print("  ✅ 提示符与回显清理")
 
 
 def test_ssh_manager_async():

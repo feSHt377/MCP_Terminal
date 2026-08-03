@@ -427,6 +427,7 @@ class MainWindow(QMainWindow):
                 on_done=_finish_agent_command,
                 source="Agent",
                 timeout=float(params.get("timeout", 30.0)),
+                execution_mode=str(params.get("execution_mode", "auto")),
             )
             self.status_panel.log_tool_call(tool_label, dispatch.get("status", "error"))
             return
