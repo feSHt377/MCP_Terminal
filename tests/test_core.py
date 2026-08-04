@@ -334,6 +334,7 @@ def test_mcp_tools_registration():
         "autocomplete_command",
         "select_session",
         "ssh_connect",
+        "ssh_connect_from_config",
         "ssh_disconnect",
         "ssh_exec",
         "terminal_write",
@@ -417,9 +418,11 @@ def test_mcp_tools_sync_call():
 
 async def _test_mcp_tools_async_inner():
     """异步工具调用测试。"""
+    import app.tools.definitions as definitions
     from app.tools.definitions import (
         ssh_disconnect,
         ssh_exec,
+        ssh_connect_from_config,
         terminal_write,
         terminal_read,
         upload_file,
@@ -430,6 +433,23 @@ async def _test_mcp_tools_async_inner():
     r = await ssh_exec("no@x:22", "ls")
     assert r["status"] == "error"
     print("  ✅ ssh_exec() 不存在会话 → 错误提示")
+
+    # ssh_connect_from_config：配置中有该主机 → 用配置账号连接；没有 → 提示换 ssh_connect
+    orig_call_gui = definitions._call_gui_async
+
+    async def _fake_gui(method, params):
+        assert method == "ssh_connect"
+        return {"status": "success", "session_id": "root@fake:22", "message": "ok"}
+
+    definitions._call_gui_async = _fake_gui
+    try:
+        r = await ssh_connect_from_config("139.224.250.35")
+        assert r["status"] == "success" and r.get("config_account") == "Aliyun-Server"
+        r = await ssh_connect_from_config("1.2.3.4")
+        assert r["status"] == "error" and r.get("reason") == "config_not_found"
+    finally:
+        definitions._call_gui_async = orig_call_gui
+    print("  ✅ ssh_connect_from_config（用配置账号连接 / 无配置时提示）")
 
     # terminal_write
     r = await terminal_write("no@x:22", "test\n")

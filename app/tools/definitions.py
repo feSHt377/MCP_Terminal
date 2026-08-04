@@ -187,27 +187,36 @@ async def ssh_connect(
     password: str | None = None,
     key_path: str | None = None,
 ) -> dict[str, Any]:
-    """建立到远程服务器的 SSH 连接。
+    """建立到远程服务器的 SSH 连接。password 和 key_path 都可以不传。
 
-    password 与 key_path 均可省略：若 config.yaml 已配置该主机，将自动使用其中
-    最近添加的一个账号登录。若配置中没有该主机且未提供凭据，返回结果会提示你
-    向用户索取 password 或 key_path 后再调用。
+    用法（照做即可）：
+      1. 先只传 host 尝试连接：
+           ssh_connect(host="1.2.3.4")
+      2. 若 config.yaml 已配置过该主机，工具会自动使用其中最近添加的账号
+         （用户名、端口、密码/私钥全部自动填充）登录，无需你提供任何凭据。
+      3. 若 config.yaml 没有该主机且你没传凭据，工具会返回
+         {"status":"error","reason":"credentials_required","message":...}。
+         此时你必须停下，向用户询问该服务器的登录凭据，二选一：
+           - SSH 密码：  ssh_connect(host="1.2.3.4", password="<用户给的密码>")
+           - 私钥路径：  ssh_connect(host="1.2.3.4", key_path="/home/user/.ssh/id_rsa")
+      4. 不要把失败当成功，也不要在没有凭据时反复重试或猜密码。
 
     连接建立后返回 session_id，后续所有操作都需要传入该 ID。
 
     Args:
         host: 服务器 IP 地址或主机名。
-        user: SSH 登录用户名，默认 root。
-        port: SSH 端口，默认 22。
-        password: SSH 密码（与 key_path 二选一，可省略由配置自动填充）。
-        key_path: SSH 私钥路径（与 password 二选一，可省略由配置自动填充）。
+        user: SSH 登录用户名，默认 root。通常由配置自动填充，无需传入。
+        port: SSH 端口，默认 22。通常由配置自动填充，无需传入。
+        password: SSH 密码，可选。与 key_path 二选一。
+        key_path: SSH 私钥路径，可选。与 password 二选一。
     """
     creds = _resolve_server_credentials(host, user, port, password, key_path)
     if creds is None:
         message = (
-            f"config.yaml 中没有 {host} 的服务器配置，且未提供登录凭据。"
-            "请向用户询问该服务器的 SSH 密码（password）或私钥路径（key_path），"
-            "然后再调用 ssh_connect。"
+            f"config.yaml 中没有 {host} 的服务器配置，且你未提供登录凭据，无法连接。"
+            "请向用户询问该服务器的登录凭据并重新调用 ssh_connect，二选一：\n"
+            f'  ssh_connect(host="{host}", password="<用户给的密码>")\n'
+            f'  ssh_connect(host="{host}", key_path="/用户给的/私钥路径")'
         )
         _log_call(
             "ssh_connect",
@@ -232,6 +241,59 @@ async def ssh_connect(
     _log_call(
         "ssh_connect",
         {"host": host, "user": creds["user"], "port": creds["port"]},
+        result,
+    )
+    return result
+
+
+@mcp.tool()
+async def ssh_connect_from_config(host: str) -> dict[str, Any]:
+    """使用 config.yaml 中已有的服务器配置直接连接，无需任何凭据。
+
+    本工具与 ssh_connect 的区别：本工具只从 config.yaml 读取登录信息，你不需要
+    也不应传入 password / key_path。只要 config.yaml 里配置过该主机，就会自动
+    使用其中最近添加的一个账号（用户名/端口/密码或私钥）登录。
+
+    用法（照做即可）：
+        1. 若之前 list_servers 或已知 config.yaml 里有该主机，直接调用：
+             ssh_connect_from_config(host="1.2.3.4")
+        2. 连接成功后返回 session_id 和 config_account（实际使用的配置账号）。
+        3. 若返回 {"status":"error","reason":"config_not_found",...}，说明
+           config.yaml 中没有该主机，请改用 ssh_connect 并向用户询问
+           password 或 key_path。
+
+    Args:
+        host: 服务器 IP 地址或主机名，必须已在 config.yaml 中配置。
+    """
+    creds = _resolve_server_credentials(host, "root", 22, None, None)
+    if creds is None:
+        message = (
+            f"config.yaml 中没有 {host} 的服务器配置，无法使用本工具连接。"
+            "请改用 ssh_connect，并向用户询问该服务器的 password 或 key_path。"
+        )
+        _log_call(
+            "ssh_connect_from_config",
+            {"host": host},
+            {"status": "error", "message": message},
+        )
+        return {
+            "status": "error",
+            "message": message,
+            "reason": "config_not_found",
+        }
+
+    result = await _call_gui_async("ssh_connect", {
+        "host": host,
+        "user": creds["user"],
+        "port": creds["port"],
+        "password": creds["password"],
+        "key_path": creds["key_path"],
+    })
+    if creds.get("account"):
+        result = {**result, "config_account": creds["account"]}
+    _log_call(
+        "ssh_connect_from_config",
+        {"host": host},
         result,
     )
     return result
