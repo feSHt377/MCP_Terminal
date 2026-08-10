@@ -333,6 +333,7 @@ def test_mcp_tools_registration():
         "proxy_command",
         "autocomplete_command",
         "select_session",
+        "switch_tab",
         "ssh_connect",
         "ssh_connect_from_config",
         "ssh_disconnect",

@@ -53,10 +53,11 @@ class StatusPanel(QWidget):
         """记录断开事件。"""
         self._append(f"[{self._now()}] ⏹ 断开 {session_id}\n", theme_current().warning)
 
-    def log_command(self, command: str, exit_code: int | None = None):
+    def log_command(self, command: str, exit_code: int | None = None, session: str | None = None):
         """记录命令执行。"""
         status = f"exit={exit_code}" if exit_code is not None else "?"
-        self._append(f"[{self._now()}] $ {command.strip()}  ({status})\n", theme_current().info)
+        prefix = f"[{session}] " if session else ""
+        self._append(f"[{self._now()}] {prefix}$ {command.strip()}  ({status})\n", theme_current().info)
 
     def log_tool_call(self, tool: str, status: str):
         """记录 MCP 工具调用。"""

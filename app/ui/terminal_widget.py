@@ -128,10 +128,6 @@ class TerminalSurface(QPlainTextEdit):
         self.ensureCursorVisible()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.matches(QKeySequence.Copy):
-            self.copy()
-            return
-
         if not self._connected:
             super().keyPressEvent(event)
             return
@@ -140,6 +136,9 @@ class TerminalSurface(QPlainTextEdit):
         modifiers = event.modifiers()
 
         if self._busy:
+            # 忙时（命令/Agent 运行中）：所有按键（含 Ctrl+C）都转发到远程 shell。
+            # 该分支必须先于下方 Copy 快捷键处理，否则 Ctrl+C 会被复制动作吞掉，
+            # 永远发不出中断信号 \x03，导致远程进程无法被取消。
             if event.matches(QKeySequence.Paste):
                 pasted = QApplication.clipboard().text()
                 if pasted:
@@ -166,6 +165,10 @@ class TerminalSurface(QPlainTextEdit):
                 self.raw_input.emit(event.text())
             else:
                 super().keyPressEvent(event)
+            return
+
+        if event.matches(QKeySequence.Copy):
+            self.copy()
             return
 
         if key in (Qt.Key_Return, Qt.Key_Enter):
@@ -203,7 +206,7 @@ class TerminalSurface(QPlainTextEdit):
 class TerminalWidget(QWidget):
     """SSH terminal shared by direct human input and MCP Agent commands."""
 
-    command_executed = Signal(str, object)
+    command_executed = Signal(str, str, object)  # (session_id, command, result)
     stream_received = Signal(str, bool)
     interactive_finished = Signal(object)
     MAX_AGENT_QUEUE = 5
@@ -489,7 +492,7 @@ class TerminalWidget(QWidget):
             self._active_command = ""
             if callback:
                 callback(result)
-            self.command_executed.emit(command, result)
+            self.command_executed.emit(self._session_id or "", command, result)
             if self._pending_commands:
                 QTimer.singleShot(0, self._run_next)
             else:

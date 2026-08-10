@@ -398,6 +398,39 @@ QPlainTextEdit#terminalOutput {
     padding: 10px;
     font-family: 'Cascadia Mono';
 }
+
+QTabWidget#terminalTabs::pane {
+    background: $glass;
+    border: 1px solid $border;
+    border-radius: 10px;
+    top: -1px;
+}
+QTabWidget#terminalTabs QTabBar::tab {
+    background: transparent;
+    color: $text_muted;
+    padding: 6px 16px;
+    margin: 2px 2px 0 2px;
+    border: 1px solid transparent;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    font-size: 12px;
+}
+QTabWidget#terminalTabs QTabBar::tab:selected {
+    background: $glass;
+    color: $text;
+    border-color: $border;
+    border-bottom-color: $glass;
+}
+QTabWidget#terminalTabs QTabBar::tab:hover:!selected {
+    background: $surface_alt;
+}
+QTabWidget#terminalTabs QTabBar::close-button {
+    margin: 4px;
+    border-radius: 4px;
+}
+QTabWidget#terminalTabs QTabBar::close-button:hover {
+    background: $surface_alt;
+}
 QFrame#terminalInputFrame {
     background: $glass;
     border: 1px solid $border;
@@ -439,6 +472,13 @@ QPlainTextEdit#logView {
 }
 
 QDialog#chatDialog { background: $glass; }
+QDialog#settingsDialog { background: $glass; }
+QLabel#settingsTitle { color: $text; font-weight: 700; font-size: 12px; }
+QLabel#settingsHint { color: $text_muted; font-size: 11px; }
+QCheckBox { color: $text; font-size: 12px; spacing: 8px; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; border: 1px solid $border; background: $surface; }
+QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
+QCheckBox::indicator:hover { border-color: $accent; }
 QFrame#chatHeader { background: $glass; border-bottom: 1px solid $border; }
 QLabel#chatTitle { color: $text; font-weight: 700; font-size: 12px; }
 QLabel#chatMode { color: $text_muted; font-size: 11px; }

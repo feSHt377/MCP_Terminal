@@ -501,6 +501,23 @@ async def select_session(session_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def switch_tab(session_id: str) -> dict[str, Any]:
+    """将 GUI 切换到指定会话的终端标签页，便于用户盯着正在执行命令的连接。
+
+    Agent 在 ssh_exec/proxy_command 前后调用本工具，可以让 GUI 自动对准命令所在
+    的标签页，用户在人工终端里就能看到命令输出。若 GUI「设置」中关闭了
+    「接受 Agent 自动切换标签页」，本工具不会擅自切换，而是返回
+    {"status":"success","switched":false}，仍视为成功。
+
+    Args:
+        session_id: 要切换到的 SSH 会话 ID（格式: user@host:port）。
+    """
+    result = await _call_gui_async("switch_tab", {"session_id": session_id})
+    _log_call("switch_tab", {"session_id": session_id}, result)
+    return result
+
+
+@mcp.tool()
 def get_dangerous_commands() -> dict[str, Any]:
     """获取已配置的危险命令列表和安全策略。"""
     security = get_security_config()

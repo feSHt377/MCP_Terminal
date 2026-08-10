@@ -50,6 +50,22 @@ def get_mcp_config() -> dict[str, Any]:
     return config.get("mcp") or {"port": 5000}
 
 
+def get_auto_switch_tab() -> bool:
+    """是否允许 Agent 自动切换 GUI 终端标签页（默认开启）。"""
+    config = load_config() or {}
+    app_cfg = config.get("app") or {}
+    return bool(app_cfg.get("auto_switch_tab", True))
+
+
+def set_auto_switch_tab(enabled: bool) -> None:
+    """持久化「Agent 自动切换标签页」开关到 config.yaml。"""
+    config = load_config() or {}
+    app_cfg = dict(config.get("app") or {})
+    app_cfg["auto_switch_tab"] = bool(enabled)
+    config["app"] = app_cfg
+    save_config(config)
+
+
 def get_security_config() -> dict[str, Any]:
     """获取安全策略配置。"""
     config = load_config()

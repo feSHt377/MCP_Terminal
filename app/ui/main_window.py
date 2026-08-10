@@ -11,10 +11,11 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QMainWindow,
     QStatusBar,
+    QTabWidget,
     QToolBar,
 )
 
-from app.config.manager import get_servers
+from app.config.manager import get_auto_switch_tab, get_servers
 from app.ipc import GuiIPCServer, IPCRequest
 from app.ssh.bridge import SSHBridge
 from app.ssh.manager import SSHManager
@@ -114,10 +115,17 @@ class MainWindow(QMainWindow):
         )
 
     def _setup_ui(self):
-        # 中央终端（始终占据主区域）
-        self.terminal = TerminalWidget()
-        self.terminal.command_executed.connect(self._on_command_executed)
-        self.setCentralWidget(self.terminal)
+        # 中央终端区 —— 每个 SSH 会话一个标签页，各自独立管理 shell
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName("terminalTabs")
+        self._tabs.setTabsClosable(True)
+        self._tabs.setMovable(True)
+        self._tabs.setDocumentMode(True)
+        self._tabs.setElideMode(Qt.ElideMiddle)
+        self._tabs.tabCloseRequested.connect(self._on_tab_close)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._tab_widgets: dict[str, TerminalWidget] = {}
+        self.setCentralWidget(self._tabs)
 
         # 左侧服务器面板 —— 可拖出成独立窗口
         self.server_panel = ServerPanel()
@@ -203,6 +211,11 @@ class MainWindow(QMainWindow):
         clear_logs_action.triggered.connect(self._clear_logs)
         tools_menu.addAction(clear_logs_action)
 
+        tools_menu.addSeparator()
+        settings_action = QAction("⚙ 设置…", self)
+        settings_action.triggered.connect(self._open_settings)
+        tools_menu.addAction(settings_action)
+
         theme_menu = menu.addMenu("主题")
         self._theme_group = QActionGroup(self)
         self._theme_group.setExclusive(True)
@@ -232,8 +245,8 @@ class MainWindow(QMainWindow):
         toolbar.addAction(refresh)
 
         clear_terminal = QAction("清空终端", self)
-        clear_terminal.setToolTip("清空当前终端的可见内容")
-        clear_terminal.triggered.connect(self.terminal.clear_terminal)
+        clear_terminal.setToolTip("清空当前终端标签页的可见内容")
+        clear_terminal.triggered.connect(self._clear_current_terminal)
         toolbar.addAction(clear_terminal)
 
         clear_logs = QAction("清空日志", self)
@@ -258,8 +271,8 @@ class MainWindow(QMainWindow):
         self.status_panel.clear_logs()
         self.status_bar.showMessage("已清空窗口日志；磁盘审计记录未删除", 3000)
 
-    def _on_command_executed(self, command: str, result: dict):
-        self.status_panel.log_command(command, result.get("exit_code"))
+    def _on_command_executed(self, session_id: str, command: str, result: dict):
+        self.status_panel.log_command(command, result.get("exit_code"), session=session_id)
 
     # ------------------------------------------------------------------
     # 服务器列表
@@ -299,35 +312,51 @@ class MainWindow(QMainWindow):
 
     def _on_connected(self, result: dict, user: str, host: str):
         if result["status"] == "success":
-            self._session_id = result["session_id"]
+            sid = result["session_id"]
             display_host = result.get("remote_hostname") or host
             current_dir = result.get("current_dir") or "~"
-            self.terminal.set_session(
-                self._session_id, user, display_host, current_dir
-            )
-            self.server_panel.set_connected(
-                self._session_id, self._session_id
-            )
-            self.status_panel.log_connect(self._session_id, host)
-            self.status_bar.showMessage(f"已连接: {self._session_id}")
+            self._open_session_tab(sid, user, display_host, current_dir)
+            self.server_panel.set_connected(sid, sid)
+            self.status_panel.log_connect(sid, host)
+            self.status_bar.showMessage(f"已连接: {sid}")
 
             # 同步会话到已打开的 Chat 测试窗口
             if hasattr(self, "_chat_window") and self._chat_window is not None:
-                self._chat_window.set_session(self._session_id)
+                self._chat_window.set_session(sid)
 
             # 展示系统欢迎信息
-            self._show_welcome(user, host)
+            self._show_welcome(sid, user, host)
         else:
             self.server_panel.set_disconnected()
             self.status_panel.log_error(f"连接失败: {result['message']}")
             self.status_bar.showMessage(f"连接失败: {result['message']}")
 
-    def _show_welcome(self, user: str, host: str):
-        """连接成功后自动展示系统基本信息。"""
-        sid = self._session_id
-        if not sid:
-            return
+    def _open_session_tab(
+        self, session_id: str, user: str, host: str, cwd: str = "~", switch: bool = True
+    ) -> TerminalWidget:
+        """为会话打开终端标签页（已存在则复用），可选是否立即切换过去。"""
+        terminal = self._tab_widgets.get(session_id)
+        if terminal is None:
+            terminal = TerminalWidget()
+            terminal.command_executed.connect(self._on_command_executed)
+            terminal.set_session(session_id, user, host, cwd)
+            index = self._tabs.addTab(terminal, f"{user}@{host}")
+            self._tabs.setTabToolTip(index, session_id)
+            self._tab_widgets[session_id] = terminal
+        if switch:
+            self._tabs.setCurrentWidget(terminal)
+        else:
+            # 后台打开的标签页不抢焦点，把焦点还给当前可见的终端。
+            current = self._current_terminal()
+            if current is not None and current is not terminal:
+                current.output.setFocus()
+        return terminal
 
+    def _show_welcome(self, sid: str, user: str, host: str):
+        """连接成功后自动展示系统基本信息。"""
+        terminal = self._tab_widgets.get(sid)
+        if terminal is None:
+            return
         manager = SSHManager()
 
         async def _welcome():
@@ -342,35 +371,38 @@ class MainWindow(QMainWindow):
             return results
 
         def _on_welcome(results: dict):
-            self.terminal.append_line("", "#d4d4d4")
+            terminal.append_line("", "#d4d4d4")
             for label, r in results.items():
                 if r["status"] == "success":
                     out = r.get("stdout", "").strip()
-                    self.terminal.append_line(f"  {label}: {out}\n", "#6a9955")
-            self.terminal.append_line("", "#d4d4d4")
+                    terminal.append_line(f"  {label}: {out}\n", "#6a9955")
+            terminal.append_line("", "#d4d4d4")
 
         self._bridge.submit_async(_welcome(), _on_welcome)
 
     def _on_disconnect(self):
         if not self._session_id:
             return
-
-        manager = SSHManager()
         sid = self._session_id
+        self.status_bar.showMessage("正在断开…")
+        self._disconnect_session(sid)
+
+    def _disconnect_session(self, session_id: str):
+        """异步断开会话，断开后移除对应标签页。"""
+        manager = SSHManager()
 
         async def _disconnect():
-            return await manager.disconnect(sid)
+            return await manager.disconnect(session_id)
 
-        self.status_bar.showMessage("正在断开…")
         self._bridge.submit_async(
             _disconnect(),
-            lambda r: self._on_disconnected(r, sid),
+            lambda r: self._on_disconnected(r, session_id),
         )
 
     def _on_disconnected(self, result: dict, session_id: str):
-        self._session_id = None
-        self.terminal.set_session(None)
-        self.server_panel.set_disconnected()
+        self._remove_tab(session_id)
+        if session_id == self._session_id:
+            self.server_panel.set_disconnected()
         self.status_panel.log_disconnect(session_id)
         self.status_bar.showMessage(result.get("message", "已断开"))
 
@@ -396,17 +428,95 @@ class MainWindow(QMainWindow):
         chat.show()
 
     def _on_agent_proxy(self, cmd: str):
-        """Agent 代理执行：注入主终端 SSH 输入框并自动执行。"""
-        if not self._session_id:
+        """Agent 代理执行：注入当前终端标签页的 SSH 输入框并自动执行。"""
+        terminal = self._current_terminal()
+        if terminal is None:
             self.status_panel.log_error("代理失败：未连接")
             return
         self.status_panel.log_tool_call("agent:proxy", "exec")
-        self.terminal.append_line(f"\n-- Agent 代理执行 --\n", "#4fc1ff")
-        self.terminal.execute_command(cmd)
+        terminal.append_line(f"\n-- Agent 代理执行 --\n", "#4fc1ff")
+        terminal.execute_command(cmd)
 
     def _on_agent_autocomplete(self, cmd: str):
+        terminal = self._current_terminal()
+        if terminal is None:
+            self.status_panel.log_error("补全失败：未连接")
+            return
         self.status_panel.log_tool_call("agent:autocomplete", "ok")
-        self.terminal.set_input_text(cmd)
+        terminal.set_input_text(cmd)
+
+    # ------------------------------------------------------------------
+    # 终端标签页管理
+    # ------------------------------------------------------------------
+
+    def _current_terminal(self) -> TerminalWidget | None:
+        """当前标签页的终端；没有打开任何标签页时返回 None。"""
+        widget = self._tabs.currentWidget()
+        return widget if isinstance(widget, TerminalWidget) else None
+
+    def _session_for_widget(self, widget) -> str | None:
+        for sid, term in self._tab_widgets.items():
+            if term is widget:
+                return sid
+        return None
+
+    def _terminal_for(self, session_id: str) -> TerminalWidget | None:
+        """获取指定会话的终端；会话已连接但没打开标签页时后台打开一个。
+
+        不主动切换当前标签页，避免 Agent 执行命令时抢占用户正在看的终端。
+        """
+        terminal = self._tab_widgets.get(session_id)
+        if terminal is not None:
+            return terminal
+        sessions = SSHManager().list_sessions().get("sessions", {})
+        info = sessions.get(session_id)
+        if info is None or not info.get("connected"):
+            return None
+        return self._open_session_tab(
+            session_id,
+            info.get("user", ""),
+            info.get("remote_hostname") or info.get("host", ""),
+            info.get("current_dir") or "~",
+            switch=False,
+        )
+
+    def _on_tab_close(self, index: int):
+        widget = self._tabs.widget(index)
+        sid = self._session_for_widget(widget)
+        self._tabs.removeTab(index)
+        if sid:
+            self._disconnect_session(sid)
+
+    def _remove_tab(self, session_id: str):
+        terminal = self._tab_widgets.pop(session_id, None)
+        if terminal is None:
+            return
+        index = self._tabs.indexOf(terminal)
+        if index >= 0:
+            self._tabs.removeTab(index)
+        terminal.deleteLater()
+
+    def _on_tab_changed(self, index: int):
+        widget = self._tabs.widget(index) if index >= 0 else None
+        sid = self._session_for_widget(widget) if widget is not None else None
+        self._session_id = sid
+        if sid:
+            self.server_panel.set_connected(sid, sid)
+            if hasattr(self, "_chat_window") and self._chat_window is not None:
+                self._chat_window.set_session(sid)
+        else:
+            self.server_panel.set_disconnected()
+
+    def _clear_current_terminal(self):
+        terminal = self._current_terminal()
+        if terminal is not None:
+            terminal.clear_terminal()
+        self.status_bar.showMessage("已清空当前终端标签页", 3000)
+
+    def _open_settings(self):
+        from app.ui.settings_dialog import SettingsDialog
+
+        SettingsDialog(self).exec()
 
     # ------------------------------------------------------------------
     # MCP / GUI 共享会话 IPC
@@ -430,6 +540,9 @@ class MainWindow(QMainWindow):
             return
         if method == "select_session":
             self._select_session(request, str(params.get("session_id", "")))
+            return
+        if method == "switch_tab":
+            self._switch_tab(request, str(params.get("session_id", "")))
             return
         if method == "autocomplete_command":
             command = str(params.get("command", ""))
@@ -455,30 +568,20 @@ class MainWindow(QMainWindow):
             )
             return
 
-        requested_sid = params.get("session_id")
+        requested_sid = str(params.get("session_id", "") or self._session_id or "")
         if method == "ssh_disconnect":
-            sid_to_close = str(requested_sid or self._session_id or "")
-            if not sid_to_close:
+            if not requested_sid:
                 request.finish({"status": "error", "message": "没有可断开的 SSH 会话"})
                 return
             manager = SSHManager()
             self._bridge.submit_async(
-                manager.disconnect(sid_to_close),
-                lambda result: self._finish_ipc_disconnect(
-                    request, result, sid_to_close, sid_to_close == self._session_id
-                ),
+                manager.disconnect(requested_sid),
+                lambda result: self._finish_ipc_disconnect(request, result, requested_sid),
             )
             return
 
-        sid = self._session_id
-        if not sid:
+        if not requested_sid:
             request.finish({"status": "error", "message": "GUI 当前没有 SSH 会话"})
-            return
-        if requested_sid and requested_sid != sid:
-            request.finish({
-                "status": "error",
-                "message": f"请求会话 {requested_sid} 不是 GUI 当前会话 {sid}",
-            })
             return
 
         if method in ("ssh_exec", "proxy_command"):
@@ -489,7 +592,14 @@ class MainWindow(QMainWindow):
                 self.status_panel.log_tool_call(tool_label, result.get("status", "error"))
                 request.finish(result)
 
-            dispatch = self.terminal.execute_command(
+            terminal = self._terminal_for(requested_sid)
+            if terminal is None:
+                request.finish({
+                    "status": "error",
+                    "message": f"会话没有可用的终端标签页: {requested_sid}",
+                })
+                return
+            dispatch = terminal.execute_command(
                 command,
                 on_done=_finish_agent_command,
                 source="Agent",
@@ -500,6 +610,7 @@ class MainWindow(QMainWindow):
             return
 
         manager = SSHManager()
+        sid = requested_sid
         if method == "terminal_write":
             coro = manager.terminal_write(sid, str(params.get("data", "")))
             callback = request.finish
@@ -526,11 +637,8 @@ class MainWindow(QMainWindow):
         self._on_connected(result, user, host)
         request.finish(result)
 
-    def _finish_ipc_disconnect(self, request, result, sid, was_current=True):
-        if was_current:
-            self._on_disconnected(result, sid)
-        elif result.get("status") == "success":
-            self.status_panel.log_disconnect(sid)
+    def _finish_ipc_disconnect(self, request, result, sid):
+        self._on_disconnected(result, sid)
         request.finish(result)
 
     def _select_session(self, request, session_id: str):
@@ -539,8 +647,7 @@ class MainWindow(QMainWindow):
         if info is None or not info.get("connected"):
             request.finish({"status": "error", "message": f"SSH 会话不存在或未连接: {session_id}"})
             return
-        self._session_id = session_id
-        self.terminal.set_session(
+        self._open_session_tab(
             session_id,
             info.get("user", ""),
             info.get("remote_hostname") or info.get("host", ""),
@@ -551,6 +658,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_chat_window") and self._chat_window is not None:
             self._chat_window.set_session(session_id)
         request.finish({"status": "success", "session_id": session_id, "message": "已切换当前会话"})
+
+    def _switch_tab(self, request: IPCRequest, session_id: str):
+        """Agent 请求切换到指定会话标签页，受「自动切换标签页」开关约束。"""
+        if not get_auto_switch_tab():
+            request.finish({
+                "status": "success",
+                "session_id": session_id,
+                "switched": False,
+                "message": "「接受 Agent 自动切换标签页」已在 GUI 设置中关闭",
+            })
+            return
+        self._select_session(request, session_id)
 
     # ------------------------------------------------------------------
     # 窗口系统事件：无边框 resize 命中测试 + 标题栏拖动
