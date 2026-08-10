@@ -8,7 +8,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.config.manager import get_auto_switch_tab, set_auto_switch_tab
+from app.config.manager import (
+    get_auto_switch_tab,
+    get_check_updates,
+    set_auto_switch_tab,
+    set_check_updates,
+)
 
 
 class SettingsDialog(QDialog):
@@ -39,6 +44,12 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(self.auto_switch)
 
+        self.check_updates = QCheckBox("启动时自动检查更新")
+        self.check_updates.setToolTip(
+            "启动 GUI 时在后台检查 GitHub 仓库是否有新版本，发现时弹出提示。"
+        )
+        layout.addWidget(self.check_updates)
+
         hint = QLabel(
             "该设置保存到 config.yaml 的 app.auto_switch_tab（默认开启）。\n"
             "修改后立即生效，Agent 下次调用 switch_tab 时按新设置执行。"
@@ -60,7 +71,9 @@ class SettingsDialog(QDialog):
 
     def _load(self):
         self.auto_switch.setChecked(get_auto_switch_tab())
+        self.check_updates.setChecked(get_check_updates())
 
     def accept(self):
         set_auto_switch_tab(self.auto_switch.isChecked())
+        set_check_updates(self.check_updates.isChecked())
         super().accept()

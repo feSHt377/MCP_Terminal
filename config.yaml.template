@@ -5,6 +5,7 @@ app:
   name: mcpterminal
   theme: dark  # dark | light
   # auto_switch_tab: true   # 是否接受 Agent 通过 switch_tab 自动切换标签页（默认 true）
+  # check_updates: true     # 启动时自动检查更新（默认 true）
 
 servers:
   # ---- 示例配置（请替换为你的服务器信息）----

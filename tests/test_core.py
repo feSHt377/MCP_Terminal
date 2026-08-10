@@ -347,6 +347,8 @@ def test_mcp_tools_registration():
         "get_dangerous_commands",
         "add_server",
         "remove_server",
+        "check_update",
+        "apply_update",
     }
     registered = set(tools.keys())
     missing = expected - registered

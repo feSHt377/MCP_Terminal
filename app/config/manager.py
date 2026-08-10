@@ -66,6 +66,22 @@ def set_auto_switch_tab(enabled: bool) -> None:
     save_config(config)
 
 
+def get_check_updates() -> bool:
+    """是否在 GUI 启动时自动检查更新（默认开启）。"""
+    config = load_config() or {}
+    app_cfg = config.get("app") or {}
+    return bool(app_cfg.get("check_updates", True))
+
+
+def set_check_updates(enabled: bool) -> None:
+    """持久化「启动时自动检查更新」开关到 config.yaml。"""
+    config = load_config() or {}
+    app_cfg = dict(config.get("app") or {})
+    app_cfg["check_updates"] = bool(enabled)
+    config["app"] = app_cfg
+    save_config(config)
+
+
 def get_security_config() -> dict[str, Any]:
     """获取安全策略配置。"""
     config = load_config()

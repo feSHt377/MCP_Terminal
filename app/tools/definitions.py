@@ -518,6 +518,28 @@ async def switch_tab(session_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def check_update() -> dict[str, Any]:
+    """检查 GitHub 仓库是否有新版本（只检测，不下载、不更新）。"""
+    from app.updater import check_for_update
+
+    result = check_for_update(timeout=8.0)
+    _log_call("check_update", {}, result)
+    return result
+
+
+@mcp.tool()
+async def apply_update() -> dict[str, Any]:
+    """下载并应用 GitHub 上的最新版本。
+
+    返回后 GUI 会自动重启以加载新版本。注意：GUI 重启会断开其持有的全部
+    SSH 会话，旧 session_id 全部失效，需重新 ssh_connect。
+    """
+    result = await _call_gui_async("apply_update", {})
+    _log_call("apply_update", {}, result)
+    return result
+
+
+@mcp.tool()
 def get_dangerous_commands() -> dict[str, Any]:
     """获取已配置的危险命令列表和安全策略。"""
     security = get_security_config()
