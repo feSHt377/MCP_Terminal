@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QMainWindow,
     QMessageBox,
-    QProgressDialog,
     QStatusBar,
     QTabWidget,
     QToolBar,
@@ -721,43 +720,45 @@ class MainWindow(QMainWindow):
         self._auto_check_started = True
         if not get_check_updates():
             return
+        self._start_update_check(manual=False)
+
+    def _start_update_check(self, manual: bool):
+        """发起一次更新检查（单飞：已有检查/下载进行中则忽略）。
+
+        全程用状态栏反馈，不弹无按钮的模态/非模态窗口，避免卡死。
+        """
+        if getattr(self, "_update_busy", False):
+            self.status_bar.showMessage("已有更新检查/下载在进行中…", 3000)
+            return
+        self._update_busy = True
+        self._update_check_manual = manual
+        self.status_bar.showMessage("正在检查更新…", 30000)
         worker = _CheckUpdateWorker(self)
         worker.done.connect(self._on_update_check_done)
         self._update_check_worker = worker
         worker.start()
 
     def _on_update_check_done(self, result: dict):
-        if result.get("status") == "success" and result.get("has_update"):
-            self._prompt_update(str(result.get("local", "")), str(result.get("remote", "")))
-
-    def _check_updates_manual(self):
-        """菜单「帮助 → 检查更新」：手动检查。"""
-        box = QMessageBox(self)
-        box.setWindowTitle("检查更新")
-        box.setText("正在检查更新…")
-        box.setStandardButtons(QMessageBox.NoButton)
-        box.show()
-        self._manual_check_box = box
-
-        worker = _CheckUpdateWorker(self)
-        worker.done.connect(self._on_manual_check_done)
-        self._manual_check_worker = worker
-        worker.start()
-
-    def _on_manual_check_done(self, result: dict):
-        box = getattr(self, "_manual_check_box", None)
-        if box is not None:
-            box.close()
-            self._manual_check_box = None
+        self._update_busy = False
+        manual = bool(getattr(self, "_update_check_manual", False))
+        self.status_bar.clearMessage()
         if result.get("status") == "success":
             if result.get("has_update"):
                 self._prompt_update(str(result.get("local", "")), str(result.get("remote", "")))
             else:
-                QMessageBox.information(
-                    self, "检查更新", f"已是最新版本 v{result.get('local')}"
-                )
+                self.status_bar.showMessage(f"已是最新版本 v{result.get('local')}", 6000)
+                if manual:
+                    QMessageBox.information(
+                        self, "检查更新", f"已是最新版本 v{result.get('local')}"
+                    )
         else:
-            QMessageBox.warning(self, "检查更新", f"检查失败：{result.get('message')}")
+            self.status_bar.showMessage(f"检查更新失败：{result.get('message')}", 8000)
+            if manual:
+                QMessageBox.warning(self, "检查更新", f"检查失败：{result.get('message')}")
+
+    def _check_updates_manual(self):
+        """菜单「帮助 → 检查更新」：手动检查。"""
+        self._start_update_check(manual=True)
 
     def _show_about(self):
         from app.updater import get_local_version
@@ -770,8 +771,15 @@ class MainWindow(QMainWindow):
             "基于 MCP 协议的通用 Agent 远程执行基础设施。",
         )
 
+    def _close_update_prompt(self):
+        box = getattr(self, "_update_prompt_box", None)
+        if box is not None:
+            box.close()
+            self._update_prompt_box = None
+
     def _prompt_update(self, local: str, remote: str):
-        """非模态提示发现新版本。"""
+        """非模态提示发现新版本（只保留一个提示框）。"""
+        self._close_update_prompt()
         box = QMessageBox(self)
         box.setWindowTitle("发现新版本")
         box.setIcon(QMessageBox.Information)
@@ -784,31 +792,34 @@ class MainWindow(QMainWindow):
             lambda btn: self._start_update_flow() if btn is update_btn else None
         )
         box.show()
+        self._update_prompt_box = box
 
     def _start_update_flow(self, request: IPCRequest | None = None):
-        """下载 → 校验 → 交给 helper 应用并重启。request 非空时先回包再重启。"""
-        from app.updater import spawn_update_helper
+        """下载 → 校验 → 交给 helper 应用并重启。request 非空时先回包再重启。
 
+        下载在后台线程执行，界面仅通过状态栏提示，不弹模态对话框。
+        """
+        if getattr(self, "_update_busy", False):
+            if request is not None:
+                request.finish({"status": "error", "message": "已有更新检查/下载在进行中"})
+            return
+        self._update_busy = True
         self._update_request = request
-
-        dialog = QProgressDialog("准备下载更新…", "取消", 0, 0, self)
-        dialog.setWindowTitle("更新")
-        dialog.setWindowModality(Qt.WindowModal)
-        dialog.setCancelButton(None)
-        dialog.show()
-        self._update_progress_dialog = dialog
+        self._close_update_prompt()
+        self.status_bar.showMessage("正在下载更新…", 120000)
 
         worker = _DownloadUpdateWorker(self)
-        worker.progress.connect(dialog.setLabelText)
+        worker.progress.connect(self._on_download_progress)
         worker.done.connect(self._on_download_done)
         self._download_worker = worker
         worker.start()
 
+    def _on_download_progress(self, message: str):
+        self.status_bar.showMessage(message, 120000)
+
     def _on_download_done(self, result: dict):
-        dialog = getattr(self, "_update_progress_dialog", None)
-        if dialog is not None:
-            dialog.close()
-            self._update_progress_dialog = None
+        self._update_busy = False
+        self.status_bar.clearMessage()
         request = getattr(self, "_update_request", None)
         self._update_request = None
 
@@ -816,7 +827,7 @@ class MainWindow(QMainWindow):
             if request is not None:
                 request.finish({"status": "error", "message": result.get("message")})
             else:
-                QMessageBox.warning(self, "更新失败", result.get("message"))
+                self.status_bar.showMessage(f"更新失败：{result.get('message')}", 10000)
             return
 
         from app.updater import spawn_update_helper
@@ -829,17 +840,18 @@ class MainWindow(QMainWindow):
                 "message": "更新已就绪，GUI 即将重启",
             })
         else:
-            QMessageBox.information(
-                self,
-                "更新",
-                f"已下载新版本 v{result.get('remote')}，GUI 将自动重启…",
+            self.status_bar.showMessage(
+                f"已下载新版本 v{result.get('remote')}，GUI 将自动重启…", 5000
             )
 
         spawn_update_helper(os.getpid(), str(result["source"]))
-        QTimer.singleShot(1000, self.close)
+        QTimer.singleShot(1500, self.close)
 
     def _start_ipc_update(self, request: IPCRequest):
         """Agent 请求更新：先检查再进入下载流程。"""
+        if getattr(self, "_update_busy", False):
+            request.finish({"status": "error", "message": "已有更新检查/下载在进行中"})
+            return
         worker = _CheckUpdateWorker(self)
         worker.done.connect(lambda r: self._on_ipc_update_check(request, r))
         self._ipc_check_worker = worker
