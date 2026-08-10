@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.theme import current as theme_current
+
 
 _ANSI_ESCAPE_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\))|(?:\x1B[@-_][0-?]*[ -/]*[@-~])"
@@ -103,12 +105,12 @@ class TerminalSurface(QPlainTextEdit):
         self._input_anchor = cursor.position()
 
         prompt_format = QTextCharFormat()
-        prompt_format.setForeground(QColor("#7ee787"))
+        prompt_format.setForeground(QColor(theme_current().success))
         prompt_format.setFontWeight(QFont.Bold)
         cursor.insertText(self._prompt, prompt_format)
 
         input_format = QTextCharFormat()
-        input_format.setForeground(QColor("#e6edf3"))
+        input_format.setForeground(QColor(theme_current().text))
         cursor.insertText(self._input_buffer, input_format)
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
@@ -119,7 +121,7 @@ class TerminalSurface(QPlainTextEdit):
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor("#e6edf3"))
+        fmt.setForeground(QColor(theme_current().text))
         cursor.insertText(text, fmt)
         self.setTextCursor(cursor)
         self._input_buffer += text
@@ -230,23 +232,11 @@ class TerminalWidget(QWidget):
         layout.setSpacing(0)
 
         self.output = TerminalSurface()
+        self.output.setObjectName("terminalOutput")
         self.output.setFrameStyle(QFrame.NoFrame)
         mono = QFont("Cascadia Mono", 10)
         mono.setStyleHint(QFont.Monospace)
         self.output.setFont(mono)
-        self.output.setStyleSheet("""
-            QPlainTextEdit {
-                background: #0d1117;
-                color: #c9d1d9;
-                selection-background-color: #1f6feb;
-                border: 1px solid #30363d;
-                border-radius: 8px 8px 0 0;
-                padding: 10px;
-            }
-            QScrollBar:vertical { background: #0d1117; width: 10px; }
-            QScrollBar::handle:vertical { background: #30363d; border-radius: 5px; min-height: 28px; }
-            QScrollBar::handle:vertical:hover { background: #484f58; }
-        """)
         self.output.command_submitted.connect(self._on_surface_command)
         self.output.raw_input.connect(self._send_raw_input)
         self.output.history_requested.connect(self._browse_history)
@@ -254,50 +244,28 @@ class TerminalWidget(QWidget):
 
         input_frame = QFrame()
         input_frame.setObjectName("terminalInputFrame")
-        input_frame.setStyleSheet("""
-            QFrame#terminalInputFrame {
-                background: #161b22;
-                border: 1px solid #30363d;
-                border-top: none;
-                border-radius: 0 0 8px 8px;
-            }
-        """)
         input_layout = QHBoxLayout(input_frame)
         input_layout.setContentsMargins(10, 7, 10, 7)
         input_layout.setSpacing(8)
 
         self.prompt_label = QLineEdit()
+        self.prompt_label.setObjectName("promptLabel")
         self.prompt_label.setReadOnly(True)
         self.prompt_label.setFrame(False)
         self.prompt_label.setFixedWidth(190)
-        self.prompt_label.setStyleSheet(
-            "color:#7ee787;background:transparent;font-family:'Cascadia Mono';font-weight:600;"
-        )
 
         self.input = QLineEdit()
+        self.input.setObjectName("terminalInput")
         self.input.setFrame(False)
         self.input.setPlaceholderText("也可以在上方 Shell 区域直接输入…")
-        self.input.setStyleSheet("""
-            QLineEdit {
-                color: #e6edf3;
-                background: transparent;
-                font-family: 'Cascadia Mono', 'Consolas', monospace;
-                font-size: 12px;
-                border: none;
-                padding: 3px;
-            }
-        """)
         self.input.returnPressed.connect(self._on_send)
 
         self.activity = QProgressBar()
+        self.activity.setObjectName("activity")
         self.activity.setRange(0, 0)
         self.activity.setTextVisible(False)
         self.activity.setFixedSize(54, 4)
         self.activity.setVisible(False)
-        self.activity.setStyleSheet("""
-            QProgressBar { border:none; background:#21262d; border-radius:2px; }
-            QProgressBar::chunk { background:#2f81f7; border-radius:2px; }
-        """)
 
         input_layout.addWidget(self.prompt_label)
         input_layout.addWidget(self.input, stretch=1)
@@ -321,15 +289,17 @@ class TerminalWidget(QWidget):
             self.input.setEnabled(True)
             self.output.set_terminal_state(True, self._busy, prompt)
             self.output.setFocus()
-            self._append_output(f"\n— 已连接 {session_id} —\n", "#7ee787")
+            self._append_output(f"\n— 已连接 {session_id} —\n", theme_current().success)
             self.output.replace_input("")
         else:
             self.prompt_label.setText("未连接")
             self.input.setEnabled(False)
             self.output.set_terminal_state(False, False)
-            self._append_output("\n— 已断开 —\n", "#8b949e")
+            self._append_output("\n— 已断开 —\n", theme_current().text_muted)
 
-    def append_line(self, text: str, color: str = "#c9d1d9") -> None:
+    def append_line(self, text: str, color: str | None = None) -> None:
+        if color is None:
+            color = theme_current().text
         self._append_output(text, color)
 
     def clear_terminal(self) -> None:
@@ -389,7 +359,7 @@ class TerminalWidget(QWidget):
         sid = self._session_id
         if not sid:
             result = {"status": "error", "message": "GUI 当前没有 SSH 会话"}
-            self._append_output("⚠ 未连接到任何服务器\n", "#f0883e")
+            self._append_output("⚠ 未连接到任何服务器\n", theme_current().warning)
             if on_done:
                 on_done(result)
             return result
@@ -423,7 +393,7 @@ class TerminalWidget(QWidget):
                         (text, on_done, source, timeout, sid, display_echo, execution_mode)
                     )
                     position = len(self._pending_commands)
-                    self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#d29922")
+                    self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", theme_current().warning)
                     return {"status": "queued", "position": position}
                 self._start_execute(
                     text, on_done, source, timeout, sid, display_echo, execution_mode
@@ -441,7 +411,7 @@ class TerminalWidget(QWidget):
                 (text, on_done, source, timeout, sid, display_echo, execution_mode)
             )
             position = len(self._pending_commands)
-            self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", "#d29922")
+            self._append_output(f"⏳ [Agent 排队 #{position}] {text}\n", theme_current().warning)
             return {"status": "queued", "position": position}
 
         self._start_execute(
@@ -463,7 +433,7 @@ class TerminalWidget(QWidget):
         self._history_index = len(self._history)
         if display_echo:
             suffix = "  [Agent]" if source == "Agent" else ""
-            self._append_output(f"$ {text}{suffix}\n", "#58a6ff" if suffix else "#79c0ff")
+            self._append_output(f"$ {text}{suffix}\n", theme_current().info if suffix else theme_current().accent)
 
         self.input.clear()
         self.input.setEnabled(False)
@@ -506,7 +476,7 @@ class TerminalWidget(QWidget):
         SSHBridge().submit_async(_exec(), self._on_result)
 
     def _on_stream_received(self, text: str, is_stderr: bool) -> None:
-        self._append_output(text, "#ff7b72" if is_stderr else "#c9d1d9", dynamic=True)
+        self._append_output(text, theme_current().danger if is_stderr else theme_current().text, dynamic=True)
 
     def _on_result(self, result: dict) -> None:
         if result.get("interactive") and result.get("ready"):
@@ -533,13 +503,13 @@ class TerminalWidget(QWidget):
 
         if not result.get("streamed"):
             if result.get("stdout"):
-                self._append_output(result["stdout"], "#c9d1d9")
+                self._append_output(result["stdout"], theme_current().text)
             if result.get("stderr"):
-                self._append_output(result["stderr"], "#ff7b72")
+                self._append_output(result["stderr"], theme_current().danger)
         if result.get("status") != "success":
-            self._append_output(f"\n❌ {result.get('message', '命令执行失败')}\n", "#ff7b72")
+            self._append_output(f"\n❌ {result.get('message', '命令执行失败')}\n", theme_current().danger)
         elif result.get("exit_code") not in (None, 0):
-            self._append_output(f"\n[exit {result['exit_code']}]\n", "#d29922")
+            self._append_output(f"\n[exit {result['exit_code']}]\n", theme_current().warning)
 
         callback = self._result_callback
         command = self._active_command
@@ -567,9 +537,9 @@ class TerminalWidget(QWidget):
         self._interactive_busy = False
         exit_code = result.get("exit_code")
         if result.get("status") == "error":
-            self._append_output(f"\n❌ {result.get('message', '交互式 Shell 已断开')}\n", "#ff7b72")
+            self._append_output(f"\n❌ {result.get('message', '交互式 Shell 已断开')}\n", theme_current().danger)
         elif exit_code not in (None, 0):
-            self._append_output(f"\n[interactive exit {exit_code}]\n", "#d29922")
+            self._append_output(f"\n[interactive exit {exit_code}]\n", theme_current().warning)
 
         if self._pending_commands:
             QTimer.singleShot(0, self._run_next)
@@ -619,7 +589,7 @@ class TerminalWidget(QWidget):
 
         def _done(result: dict) -> None:
             if result.get("status") == "error":
-                self._append_output(f"\n⚠ 输入失败: {result.get('message')}\n", "#f0883e")
+                self._append_output(f"\n⚠ 输入失败: {result.get('message')}\n", theme_current().warning)
 
         SSHBridge().submit_realtime(SSHManager().terminal_write(sid, data), _done)
 
@@ -631,9 +601,11 @@ class TerminalWidget(QWidget):
         self.input.setText(text)
         self.output.replace_input(text)
 
-    def _append_output(self, text: str, color: str = "#c9d1d9", dynamic: bool = False) -> None:
+    def _append_output(self, text: str, color: str | None = None, dynamic: bool = False) -> None:
         if not text:
             return
+        if color is None:
+            color = theme_current().text
         saved_input = self.output.detach_input_line()
         cursor = self.output.textCursor()
         cursor.movePosition(QTextCursor.End)

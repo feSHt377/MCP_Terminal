@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QTextEdit, QVBoxLayout,
 )
 
+from app.ui.theme import current as theme_current
+
 
 class _AgentWorker(QThread):
     """在独立线程运行 Agent，避免占用唯一 SSHBridge 事件循环。"""
@@ -72,80 +74,67 @@ class ChatWindow(QDialog):
     # ==================================================================
 
     def _setup_ui(self):
-        self.setStyleSheet("QDialog { background-color: #1e1e1e; }")
+        self.setObjectName("chatDialog")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # 标题栏
         hdr = QFrame()
+        hdr.setObjectName("chatHeader")
         hdr.setFixedHeight(40)
-        hdr.setStyleSheet("background:#2d2d30; border-bottom:1px solid #3c3c3c;")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(12, 6, 12, 6)
         t = QLabel("MCP 工具链测试 — Agent 模拟")
+        t.setObjectName("chatTitle")
         t.setFont(QFont("", 10, QFont.Bold))
-        t.setStyleSheet("color:#ccc; background:transparent;")
         hl.addWidget(t, 1)
         self.mode_lbl = QLabel("(模拟)")
-        self.mode_lbl.setStyleSheet("color:#808080; font-size:10px; background:transparent;")
+        self.mode_lbl.setObjectName("chatMode")
         hl.addWidget(self.mode_lbl)
         layout.addWidget(hdr)
 
         # 消息区
         self.chat = QTextEdit()
+        self.chat.setObjectName("chatView")
         self.chat.setReadOnly(True)
         self.chat.setFrameStyle(QFrame.NoFrame)
         self.chat.setFont(QFont("Consolas", 10))
-        self.chat.setStyleSheet(
-            "QTextEdit{background:#1e1e1e;color:#d4d4d4;border:none;padding:8px;}"
-            "QScrollBar:vertical{background:#2d2d30;width:10px;}"
-            "QScrollBar::handle:vertical{background:#555;border-radius:5px;}"
-        )
         layout.addWidget(self.chat, 1)
 
         # 输入栏
         inf = QFrame()
+        inf.setObjectName("chatInputBar")
         inf.setFixedHeight(48)
-        inf.setStyleSheet("background:#2d2d30; border-top:1px solid #3c3c3c;")
         il = QHBoxLayout(inf)
         il.setContentsMargins(10, 6, 10, 6)
         il.setSpacing(6)
 
         self.msg_input = QLineEdit()
+        self.msg_input.setObjectName("chatInput")
         self.msg_input.setPlaceholderText("输入: 检查GPU / 磁盘 / docker / lxc / 进程…")
-        self.msg_input.setStyleSheet(
-            "QLineEdit{background:#3c3c3c;color:#d4d4d4;border:1px solid #555;"
-            "border-radius:4px;padding:6px 10px;font-size:12px;}"
-        )
         self.msg_input.returnPressed.connect(self._on_send)
         il.addWidget(self.msg_input, 1)
 
-        btn_css = (
-            "QPushButton{color:white;border:none;border-radius:4px;"
-            "padding:6px;font-size:11px;}"
-            "QPushButton:disabled{background:#555;color:#888;}"
-        )
-
         self.send_btn = QPushButton("发送")
+        self.send_btn.setObjectName("chatSend")
         self.send_btn.setFixedWidth(50)
-        self.send_btn.setStyleSheet(btn_css + "QPushButton{background:#0e639c;} QPushButton:hover{background:#1177bb;}")
         self.send_btn.clicked.connect(self._on_send)
         il.addWidget(self.send_btn)
 
         self.proxy_btn = QPushButton("代理")
+        self.proxy_btn.setObjectName("chatProxy")
         self.proxy_btn.setFixedWidth(50)
         self.proxy_btn.setToolTip("命令注入主终端并执行")
         self.proxy_btn.setEnabled(False)
-        self.proxy_btn.setStyleSheet(btn_css + "QPushButton{background:#6a9955;} QPushButton:hover{background:#7eb356;}")
         self.proxy_btn.clicked.connect(self._on_proxy)
         il.addWidget(self.proxy_btn)
 
         self.ac_btn = QPushButton("补全")
+        self.ac_btn.setObjectName("chatAutocomplete")
         self.ac_btn.setFixedWidth(50)
         self.ac_btn.setToolTip("命令填入主终端，不自动执行")
         self.ac_btn.setEnabled(False)
-        self.ac_btn.setStyleSheet(btn_css + "QPushButton{background:#ce9178;} QPushButton:hover{background:#d4a58a;}")
         self.ac_btn.clicked.connect(self._on_autocomplete)
         il.addWidget(self.ac_btn)
 
@@ -155,7 +144,7 @@ class ChatWindow(QDialog):
         from app.agent.llm_client import create_client_from_config
         if create_client_from_config() is not None:
             self.mode_lbl.setText("(LLM)")
-            self.mode_lbl.setStyleSheet("color:#6a9955;font-size:10px;background:transparent;")
+            self.mode_lbl.setStyleSheet("color:" + theme_current().success + ";font-size:10px;background:transparent;")
 
     # ==================================================================
     # 消息
@@ -164,11 +153,12 @@ class ChatWindow(QDialog):
     def _add_message(self, role, text):
         c = self.chat.textCursor()
         c.movePosition(QTextCursor.End)
-        colors = {"user": "#569cd6", "agent": "#4fc1ff", "tool": "#ce9178",
-                   "result": "#6a9955", "system": "#808080", "error": "#f44747"}
+        p = theme_current()
+        colors = {"user": p.info, "agent": p.accent_hover, "tool": p.warning,
+                   "result": p.success, "system": p.text_muted, "error": p.danger}
         prefixes = {"user": "你", "agent": "Agent", "tool": "工具",
                      "result": "", "system": "info", "error": "ERR"}
-        color = colors.get(role, "#d4d4d4")
+        color = colors.get(role, p.text)
         prefix = prefixes.get(role, "")
         fmt = c.charFormat()
         fmt.setForeground(QColor(color))

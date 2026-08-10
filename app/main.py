@@ -28,9 +28,13 @@ def run_gui():
 
     from PySide6.QtWidgets import QApplication
     from app.ui.main_window import MainWindow
+    from app.ui.theme import ThemeManager
 
     app = QApplication(sys.argv)
     app.setApplicationName("mcpterminal")
+    # 全局现代化主题：跟随系统亮暗自动切换
+    app._theme_manager = ThemeManager(app)
+    app._theme_manager.apply()
     window = MainWindow()
     window.show()
     try:

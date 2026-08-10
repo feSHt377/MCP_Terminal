@@ -1,11 +1,15 @@
-"""主窗口 — 三栏布局：服务器列表 | 终端 | 操作日志。"""  # noqa: D205
+"""主窗口 — 无边框玻璃窗口，三栏布局：服务器列表 | 终端 | 操作日志。"""  # noqa: D205
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
-from PySide6.QtGui import QAction, QCursor, QGuiApplication
+import sys
+import ctypes
+from ctypes import wintypes
+
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QDockWidget,
     QMainWindow,
-    QSplitter,
     QStatusBar,
     QToolBar,
 )
@@ -17,19 +21,40 @@ from app.ssh.manager import SSHManager
 from app.ui.server_panel import ServerPanel
 from app.ui.status_panel import StatusPanel
 from app.ui.terminal_widget import TerminalWidget
+from app.ui.theme import MODES, MODE_DARK, MODE_LIGHT, MODE_SYSTEM
+from app.ui.title_bar import TitleBar
+from app.ui.windows_effects import (
+    HTCLIENT,
+    HTLEFT,
+    HTTOP,
+    HTTOPRIGHT,
+    HTTOPLEFT,
+    HTBOTTOM,
+    HTBOTTOMLEFT,
+    HTBOTTOMRIGHT,
+    HTRIGHT,
+    RESIZE_MARGIN,
+    WM_NCHITTEST,
+    apply_window_effects,
+)
 
 
 class MainWindow(QMainWindow):
-    """mcpterminal 主窗口。"""
+    """mcpterminal 主窗口 — 无边框 + Mica 圆角 + 自绘标题栏。"""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("mcpterminal — MCP 远程终端")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        # 注意：不启用 WA_TranslucentBackground（每像素透明窗口在 Win11 上会导致
+        # 子控件点击穿透）。玻璃质感由 Mica 背景 + QSS 渐变实现。
+        self._effects_applied = False
         self._fit_current_screen()
         self._shown_once = False
 
         self._session_id: str | None = None
 
+        self._setup_title_bar()
         self._setup_ui()
         self._setup_menu()
         self._setup_toolbar()
@@ -43,6 +68,27 @@ class MainWindow(QMainWindow):
         self._ipc = GuiIPCServer(self)
         self._ipc.request_received.connect(self._on_ipc_request)
         self._ipc.start()
+
+    # ------------------------------------------------------------------
+    # 标题栏（自绘，替代 Windows 原生边框）
+    # ------------------------------------------------------------------
+
+    def _setup_title_bar(self):
+        self._title_bar = TitleBar(self)
+        self._title_bar.set_app_name("MCP Terminal")
+        self._title_bar.minimize_clicked.connect(self.showMinimized)
+        self._title_bar.maximize_clicked.connect(self._toggle_maximize)
+        self._title_bar.close_clicked.connect(self.close)
+        self.setMenuWidget(self._title_bar)
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _sync_maximize_state(self):
+        self._title_bar.set_maximize_state(self.isMaximized())
 
     # ------------------------------------------------------------------
     # UI 搭建
@@ -68,60 +114,68 @@ class MainWindow(QMainWindow):
         )
 
     def _setup_ui(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #010409;
-            }
-            QStatusBar {
-                background-color: #161b22;
-                color: #8b949e;
-                border-top: 1px solid #30363d;
-                font-size: 11px;
-            }
-            QSplitter::handle { background: #21262d; }
-            QSplitter::handle:hover { background: #2f81f7; }
-            QToolTip {
-                color: #e6edf3;
-                background: #161b22;
-                border: 1px solid #30363d;
-                padding: 5px;
-            }
-        """)
+        # 中央终端（始终占据主区域）
+        self.terminal = TerminalWidget()
+        self.terminal.command_executed.connect(self._on_command_executed)
+        self.setCentralWidget(self.terminal)
 
-        splitter = QSplitter(Qt.Horizontal)
-
+        # 左侧服务器面板 —— 可拖出成独立窗口
         self.server_panel = ServerPanel()
         self.server_panel.connect_requested.connect(self._on_connect)
         self.server_panel.disconnect_requested.connect(self._on_disconnect)
+        self._server_dock = self._make_dock("服务器", self.server_panel)
 
-        self.terminal = TerminalWidget()
-        self.terminal.command_executed.connect(self._on_command_executed)
-
+        # 右侧操作日志面板 —— 可拖出成独立窗口
         self.status_panel = StatusPanel()
+        self._status_dock = self._make_dock("操作日志", self.status_panel)
 
-        splitter.addWidget(self.server_panel)
-        splitter.addWidget(self.terminal)
-        splitter.addWidget(self.status_panel)
-        splitter.setSizes([210, 760, 310])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setHandleWidth(4)
-
-        self.setCentralWidget(splitter)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._server_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._status_dock)
+        self.resizeDocks([self._server_dock, self._status_dock], [220, 320], Qt.Horizontal)
 
         self.status_bar = QStatusBar()
         self.status_bar.showMessage("就绪 — 选择左侧服务器后点击「连接」")
         self.setStatusBar(self.status_bar)
 
+    def _make_dock(self, title: str, widget) -> QDockWidget:
+        """创建可移动 / 可拖出 / 可关闭的停靠面板。"""
+        dock = QDockWidget(title, self)
+        dock.setObjectName(f"dock_{title}")
+        dock.setWidget(widget)
+        dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        return dock
+
+    def _reset_layout(self):
+        """恢复默认停靠布局。"""
+        self._server_dock.show()
+        self._status_dock.show()
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._server_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self._status_dock)
+        self.resizeDocks([self._server_dock, self._status_dock], [220, 320], Qt.Horizontal)
+        self.status_bar.showMessage("已恢复默认布局", 3000)
+
+    def _theme_manager_mode(self) -> str:
+        """读取当前主题模式（来自 main.py 安装的 ThemeManager）。"""
+        manager = getattr(QApplication.instance(), "_theme_manager", None)
+        return manager.mode() if manager is not None else MODE_SYSTEM
+
+    def _on_theme_selected(self, action: QAction):
+        """菜单勾选 → 切换主题模式并持久化。"""
+        manager = getattr(QApplication.instance(), "_theme_manager", None)
+        if manager is None:
+            return
+        mode = action.data()
+        manager.set_mode(mode)
+        labels = {MODE_LIGHT: "亮色", MODE_DARK: "暗色", MODE_SYSTEM: "跟随系统"}
+        self.status_bar.showMessage(f"主题: {labels.get(mode, mode)}", 3000)
+
     def _setup_menu(self):
-        menu = self.menuBar()
-        menu.setStyleSheet("""
-            QMenuBar { background-color: #3c3c3c; color: #cccccc; }
-            QMenuBar::item:selected { background-color: #094771; }
-            QMenu { background-color: #2d2d30; color: #cccccc; border: 1px solid #3c3c3c; }
-            QMenu::item:selected { background-color: #094771; }
-        """)
+        menu = self._title_bar.menu_bar
 
         file_menu = menu.addMenu("文件")
         refresh_action = QAction("刷新服务器列表", self)
@@ -132,6 +186,14 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        view_menu = menu.addMenu("视图")
+        view_menu.addAction(self._server_dock.toggleViewAction())
+        view_menu.addAction(self._status_dock.toggleViewAction())
+        view_menu.addSeparator()
+        reset_layout_action = QAction("恢复默认布局", self)
+        reset_layout_action.triggered.connect(self._reset_layout)
+        view_menu.addAction(reset_layout_action)
+
         tools_menu = menu.addMenu("工具")
         chat_action = QAction("🤖 Agent Chat（MCP 工具链测试）", self)
         chat_action.triggered.connect(self._open_chat)
@@ -141,29 +203,28 @@ class MainWindow(QMainWindow):
         clear_logs_action.triggered.connect(self._clear_logs)
         tools_menu.addAction(clear_logs_action)
 
+        theme_menu = menu.addMenu("主题")
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        theme_mode = self._theme_manager_mode()
+        for mode, label in (
+            (MODE_LIGHT, "☀️ 亮色"),
+            (MODE_DARK, "🌙 暗色"),
+            (MODE_SYSTEM, "🖥️ 跟随系统"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.setChecked(mode == theme_mode)
+            self._theme_group.addAction(action)
+            theme_menu.addAction(action)
+        self._theme_group.triggered.connect(self._on_theme_selected)
+
     def _setup_toolbar(self):
         toolbar = QToolBar("快捷工具", self)
         toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        toolbar.setStyleSheet("""
-            QToolBar#mainToolbar {
-                background: #0d1117;
-                border: none;
-                border-bottom: 1px solid #21262d;
-                spacing: 5px;
-                padding: 5px 8px;
-            }
-            QToolButton {
-                color: #c9d1d9;
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 6px;
-                padding: 6px 10px;
-            }
-            QToolButton:hover { background: #21262d; border-color: #30363d; }
-            QToolButton:pressed { background: #30363d; }
-        """)
 
         refresh = QAction("刷新服务器", self)
         refresh.setToolTip("重新读取服务器配置")
@@ -185,6 +246,12 @@ class MainWindow(QMainWindow):
         agent.setToolTip("打开内置 Agent 工具链测试窗口")
         agent.triggered.connect(self._open_chat)
         toolbar.addAction(agent)
+
+        toolbar.addSeparator()
+        reset_layout = QAction("重置布局", self)
+        reset_layout.setToolTip("将拖出的面板恢复到默认停靠位置")
+        reset_layout.triggered.connect(self._reset_layout)
+        toolbar.addAction(reset_layout)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
     def _clear_logs(self):
@@ -486,6 +553,71 @@ class MainWindow(QMainWindow):
         request.finish({"status": "success", "session_id": session_id, "message": "已切换当前会话"})
 
     # ------------------------------------------------------------------
+    # 窗口系统事件：无边框 resize 命中测试 + 标题栏拖动
+    # ------------------------------------------------------------------
+
+    def nativeEvent(self, event_type, message):
+        """拦截 WM_NCHITTEST，让无边框窗口支持边缘缩放。
+
+        WM_NCHITTEST 的 lParam 是物理像素坐标，而 Qt 的 mapFromGlobal /
+        默认命中测试按逻辑像素解释。高分屏（dpr>1）下直接用物理坐标会
+        把窗口右侧/下侧大片区域误判为缩放边缘（HTRIGHT/HTBOTTOM 等），
+        导致这些区域的控件收不到任何鼠标事件。因此先做 DPI 换算，并对
+        内部区域显式返回 HTCLIENT，不再交给 Qt 默认处理。
+        """
+        if sys.platform == "win32" and event_type == b"windows_generic_MSG":
+            try:
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_NCHITTEST:
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    result = self._hit_test(x, y)
+                    if result is None:
+                        # 内部区域：显式 HTCLIENT，避免 Qt 默认把高 DPI
+                        # 物理坐标误判为边缘缩放区，吞掉按钮点击。
+                        return True, HTCLIENT
+                    return True, result
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
+
+    def _hit_test(self, x: int, y: int):
+        """WM_NCHITTEST 处理：仅在四边返回缩放区域，其余返回 HTCLIENT。
+
+        x/y 为物理像素坐标，需先换算成逻辑坐标再与逻辑尺寸比较。
+        """
+        if self.isMaximized() or not self.isVisible():
+            return None
+        dpr = self.devicePixelRatio() or 1.0
+        local = self.mapFromGlobal(QPoint(round(x / dpr), round(y / dpr)))
+        width, height = self.width(), self.height()
+        m = RESIZE_MARGIN
+        # 四角优先
+        if local.y() <= m and local.x() <= m:
+            return HTTOPLEFT
+        if local.y() <= m and local.x() >= width - m:
+            return HTTOPRIGHT
+        if local.y() >= height - m and local.x() <= m:
+            return HTBOTTOMLEFT
+        if local.y() >= height - m and local.x() >= width - m:
+            return HTBOTTOMRIGHT
+        if local.y() <= m:
+            return HTTOP
+        if local.y() >= height - m:
+            return HTBOTTOM
+        if local.x() <= m:
+            return HTLEFT
+        if local.x() >= width - m:
+            return HTRIGHT
+        return None
+
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_maximize_state()
+
+    # ------------------------------------------------------------------
     # 关闭
     # ------------------------------------------------------------------
 
@@ -494,13 +626,16 @@ class MainWindow(QMainWindow):
         if self._shown_once:
             return
         self._shown_once = True
-        self.setWindowOpacity(0.0)
-        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_animation.setDuration(220)
-        self._fade_animation.setStartValue(0.0)
-        self._fade_animation.setEndValue(1.0)
-        self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
-        self._fade_animation.start()
+        # 应用毛玻璃 + 圆角特效（需先有原生窗口句柄）
+        if sys.platform == "win32" and not self._effects_applied:
+            self._effects_applied = True
+            try:
+                from app.ui.theme import current as theme_current
+
+                apply_window_effects(int(self.winId()), theme_current().scheme)
+            except Exception:
+                pass
+        self._sync_maximize_state()
 
     def closeEvent(self, event):
         if SSHManager().list_sessions().get("count", 0):
