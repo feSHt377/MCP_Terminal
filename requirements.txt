@@ -1,0 +1,17 @@
+# mcpterminal runtime dependencies
+# Supported Python: 3.10–3.14
+
+# MCP Python SDK v1 is the current stable production line.
+mcp>=1.28.1,<2
+
+# Windows GUI and Qt event loop.
+PySide6>=6.10,<7
+
+# Shared asynchronous SSH connections and interactive shells.
+asyncssh>=2.20,<3
+
+# YAML configuration.
+PyYAML>=6.0.2,<7
+
+# OpenAI-compatible/Ollama HTTP client used by the optional built-in Agent UI.
+requests>=2.32.5,<3

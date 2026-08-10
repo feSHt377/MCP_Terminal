@@ -8,6 +8,9 @@
 *.txt
 logs/
 
+# 例外：requirements.txt 必须纳入版本控制（更新/分发依赖它）
+!requirements.txt
+
 # Python
 __pycache__/
 *.py[cod]
