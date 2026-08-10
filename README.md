@@ -22,7 +22,7 @@
                         ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  MCP Server  (python -m app.main --mcp)                      │
-│  ├── 16+ 标准化工具 (SSH / 文件传输 / 会话管理 / 安全策略)     │
+│  ├── 18 个标准化工具 (SSH / 文件传输 / 会话管理 / 安全策略)   │
 │  └── 内置 Agent 层 (LLM + Function Calling)                  │
 └───────────────────────┬──────────────────────────────────────┘
                         │  本地回环 IPC (JSON-RPC + 认证令牌)
@@ -30,8 +30,9 @@
 ┌──────────────────────────────────────────────────────────────┐
 │  Terminal GUI  (PySide6)                                     │
 │  ├── 唯一 SSHManager ── 多服务器会话管理                      │
-│  ├── 当前终端绑定 ── 人工/AI 共享同一终端                      │
+│  ├── 标签页式终端 ── 每个连接一个标签页，各管理独立 shell      │
 │  ├── 聊天窗口 ── 自然语言指令输入                              │
+│  ├── 设置面板 ── Agent 自动切换标签页等开关                    │
 │  └── 安全策略 ── 危险命令拦截 & 审批                           │
 └───────────────────────┬──────────────────────────────────────┘
                         │  SSH
@@ -47,8 +48,9 @@
 - GUI 进程是 SSH 会话的**唯一所有者**，MCP Server 不建立第二条 SSH 连接
 - MCP Server 通过本地 IPC（回环地址 + 随机令牌）请求 GUI 操作已有会话
 - 重复启动 GUI 会激活已有窗口，不会创建第二个终端程序实例
-- `list_sessions` 查询所有会话；`select_session` 切换 GUI 当前焦点
-- Shell 主区域和底部输入栏均可输入；活动命令运行时，按键会实时写入远程 PTY
+- **标签页式连接管理**：每个连接（会话）一个终端标签页，各自管理独立 shell；连接多台服务器互不干扰，标签可拖动、可关闭
+- `list_sessions` 查询所有会话；`select_session` 切换 GUI 当前焦点；`switch_tab` 由 Agent 自动切换命令所在标签页（可在 GUI「设置」中关闭）
+- Shell 主区域和底部输入栏均可输入；活动命令运行时，按键（含 Ctrl+C 中断信号）会实时写入远程 PTY
 - 命令输出按块实时刷新，支持下载进度等使用回车符更新同一行的动态输出
 - 命令执行支持 `auto`、`command`、`interactive` 三种模式；任意交互程序就绪后可继续接受人工或 `terminal_write` 输入，无须维护命令白名单
 - 窗口按当前屏幕可用分辨率的 3/5 居中启动，工具栏可分别清空终端和可见操作日志
@@ -132,6 +134,7 @@ MCP Terminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用�
 | `list_servers` | 列出配置文件中定义的所有服务器 |
 | `list_sessions` | 列出所有活跃的 SSH 会话及状态 |
 | `select_session` | 切换 GUI 当前终端到指定会话 |
+| `switch_tab` | 将 GUI 切换到指定会话的标签页（Agent 自动对准命令输出，可在 GUI「设置」中关闭） |
 | `add_server` | 添加 SSH 服务器到配置文件 |
 | `remove_server` | 从配置文件中移除服务器 |
 
@@ -208,7 +211,11 @@ GUI 内置聊天窗口，支持直接输入自然语言指令：
 ### 方式三：人工操作 GUI
 
 直接通过 GUI 界面连接服务器、执行命令、传输文件。
-所有操作对 AI Agent 可见，人类可随时监控、干预和接管。
+
+- **标签页式终端**：连接多台服务器时，每个连接一个独立标签页，互不干扰；顶部标签可拖动排序、点击 ✕ 断开
+- **命令输出实时可见**：Agent 执行的每条命令都会在对应标签页实时显示，人在回路可随时看到、可随时 Ctrl+C 中断
+- **设置面板**：菜单「工具 → ⚙ 设置」可控制「是否接受 Agent 自动切换标签页」（默认开启，保存于 `config.yaml` 的 `app.auto_switch_tab`）
+- 所有操作对 AI Agent 可见，人类可随时监控、干预和接管。
 
 ## 为什么不是 Agent？
 
@@ -243,14 +250,18 @@ mcpterminal/
 │   │   ├── agent_loop.py    # Agent 循环：自然语言 → 工具调用 → 执行
 │   │   └── llm_client.py    # OpenAI 兼容 API 客户端
 │   ├── ui/                  # 界面（PySide6）
-│   │   ├── main_window.py   # 主窗口
+│   │   ├── main_window.py   # 主窗口（标签页式终端 + 无边框缩放）
+│   │   ├── title_bar.py     # 自绘标题栏（最小化/最大化/关闭）
+│   │   ├── windows_effects.py # Win11 毛玻璃/圆角/边缘缩放特效
+│   │   ├── theme.py         # 亮/暗主题系统
 │   │   ├── server_panel.py  # 服务器管理面板
-│   │   ├── status_panel.py  # 状态面板
-│   │   ├── terminal_widget.py # 终端组件
-│   │   └── chat_window.py   # 聊天窗口
+│   │   ├── status_panel.py  # 操作日志面板
+│   │   ├── terminal_widget.py # 终端组件（单会话 shell）
+│   │   ├── chat_window.py   # 聊天窗口
+│   │   └── settings_dialog.py # 设置面板（Agent 自动切换标签页开关）
 │   ├── terminal/            # SSH 终端组件
 │   ├── tools/               # MCP 工具定义
-│   │   └── definitions.py   # 16+ 标准化工具
+│   │   └── definitions.py   # 18 个标准化工具
 │   ├── mcp/                 # MCP Server 核心
 │   │   └── server.py        # FastMCP 服务
 │   ├── ssh/                 # SSH 连接管理
@@ -272,19 +283,23 @@ mcpterminal/
 
 | 类别 | 技术 |
 |------|------|
-| **GUI** | PySide6 |
-| **SSH** | asyncssh / paramiko |
+| **GUI** | PySide6（无边框 + Win11 毛玻璃/圆角） |
+| **SSH** | asyncssh |
 | **AI 协议** | MCP (Model Context Protocol) / FastMCP |
 | **AI 后端** | 任意支持 MCP 的 Agent（Copilot / Claude / Codex / 自定义 Agent） |
 | **LLM** | OpenAI 兼容 API（Function Calling） |
 | **IPC** | 本地回环 JSON-RPC |
-| **数据库** | SQLite |
 
 ## 配置
 
 服务器配置位于 `config.yaml`：
 
 ```yaml
+app:
+  name: mcpterminal
+  theme: dark            # dark | light | system
+  auto_switch_tab: true  # 是否接受 Agent 通过 switch_tab 自动切换标签页（默认 true）
+
 servers:
   my-server:
     host: 192.168.1.100
