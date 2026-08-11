@@ -437,7 +437,7 @@ async def _test_mcp_tools_async_inner():
     assert r["status"] == "error"
     print("  ✅ ssh_exec() 不存在会话 → 错误提示")
 
-    # ssh_connect_from_config：配置中有该主机 → 用配置账号连接；没有 → 提示换 ssh_connect
+    # ssh_connect_from_config：按别名精确匹配 → 用该配置连接；别名不存在 → 提示换 ssh_connect
     orig_call_gui = definitions._call_gui_async
 
     async def _fake_gui(method, params):
@@ -446,13 +446,13 @@ async def _test_mcp_tools_async_inner():
 
     definitions._call_gui_async = _fake_gui
     try:
-        r = await ssh_connect_from_config("139.224.250.35")
+        r = await ssh_connect_from_config("Aliyun-Server")
         assert r["status"] == "success" and r.get("config_account") == "Aliyun-Server"
         r = await ssh_connect_from_config("1.2.3.4")
         assert r["status"] == "error" and r.get("reason") == "config_not_found"
     finally:
         definitions._call_gui_async = orig_call_gui
-    print("  ✅ ssh_connect_from_config（用配置账号连接 / 无配置时提示）")
+    print("  ✅ ssh_connect_from_config（按别名连接 / 别名不存在时提示）")
 
     # terminal_write
     r = await terminal_write("no@x:22", "test\n")

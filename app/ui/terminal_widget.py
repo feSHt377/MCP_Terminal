@@ -333,10 +333,10 @@ class TerminalWidget(QWidget):
         self.output.replace_input(text)
 
     def eventFilter(self, obj, event):
-        # 交互模式下，底部输入栏按 Ctrl+C 发送中断信号 \x03 而不是复制。
+        # 命令运行/交互模式中，底部输入栏按 Ctrl+C 发送中断信号 \x03 而不是复制。
         if (
             obj is self.input
-            and self._interactive_mode
+            and self._busy
             and event.type() == QEvent.KeyPress
             and event.matches(QKeySequence.Copy)
         ):
@@ -346,11 +346,12 @@ class TerminalWidget(QWidget):
 
     def _on_send(self) -> None:
         text = self.input.text()
-        if self._interactive_mode:
-            # 交互模式下，底部输入栏作为当前活动进程的输入通道
-            # （可输入 exit 退出，或在下栏按 Ctrl+C 中断）。
+        if self._busy:
+            # 命令运行/交互模式中：底部输入栏作为活动进程的输入通道。
+            # 可输入 exit 退出嵌套 shell，或在栏内按 Ctrl+C 中断当前命令。
             self.input.clear()
-            self._send_raw_input(text + "\n")
+            if text or self._interactive_mode:
+                self._send_raw_input(text + "\n")
             return
         if not text.strip():
             self.output.finish_input_line()
@@ -457,10 +458,10 @@ class TerminalWidget(QWidget):
             suffix = "  [Agent]" if source == "Agent" else ""
             self._append_output(f"$ {text}{suffix}\n", theme_current().info if suffix else theme_current().accent)
 
-        if not self._interactive_mode:
-            # 已处于交互模式时保留底部输入栏（作为活动进程输入通道）。
-            self.input.clear()
-            self.input.setEnabled(False)
+        # 命令运行期间底部输入栏保持可用，作为活动进程的输入通道
+        # （回车转发输入、Ctrl+C 发送中断 \x03），不阻塞人工介入。
+        self.input.clear()
+        self.input.setPlaceholderText("命令运行中：回车发送到当前进程 / Ctrl+C 中断")
         self._busy = True
         self._interactive_busy = self._interactive_mode
         self.activity.setVisible(True)

@@ -27,6 +27,7 @@ from app.ui.terminal_widget import TerminalWidget
 from app.ui.theme import MODES, MODE_DARK, MODE_LIGHT, MODE_SYSTEM
 from app.ui.title_bar import TitleBar
 from app.ui.windows_effects import (
+    HTCAPTION,
     HTCLIENT,
     HTLEFT,
     HTTOP,
@@ -902,33 +903,43 @@ class MainWindow(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def _hit_test(self, x: int, y: int):
-        """WM_NCHITTEST 处理：仅在四边返回缩放区域，其余返回 HTCLIENT。
+        """WM_NCHITTEST 处理：边缘缩放 + 标题栏空白区返回 HTCAPTION。
 
         x/y 为物理像素坐标，需先换算成逻辑坐标再与逻辑尺寸比较。
+        标题栏空白区返回 HTCAPTION 以恢复 Windows 原生窗口手势：
+        拖动移动/半屏吸附/四分之一分屏、双击最大化、最大化后拖下还原。
+        按钮/菜单/应用名所在处返回 HTCLIENT，保证点击仍交给控件。
         """
-        if self.isMaximized() or not self.isVisible():
+        if not self.isVisible():
             return None
         dpr = self.devicePixelRatio() or 1.0
         local = self.mapFromGlobal(QPoint(round(x / dpr), round(y / dpr)))
         width, height = self.width(), self.height()
         m = RESIZE_MARGIN
-        # 四角优先
-        if local.y() <= m and local.x() <= m:
-            return HTTOPLEFT
-        if local.y() <= m and local.x() >= width - m:
-            return HTTOPRIGHT
-        if local.y() >= height - m and local.x() <= m:
-            return HTBOTTOMLEFT
-        if local.y() >= height - m and local.x() >= width - m:
-            return HTBOTTOMRIGHT
-        if local.y() <= m:
-            return HTTOP
-        if local.y() >= height - m:
-            return HTBOTTOM
-        if local.x() <= m:
-            return HTLEFT
-        if local.x() >= width - m:
-            return HTRIGHT
+        if not self.isMaximized():
+            # 四角优先
+            if local.y() <= m and local.x() <= m:
+                return HTTOPLEFT
+            if local.y() <= m and local.x() >= width - m:
+                return HTTOPRIGHT
+            if local.y() >= height - m and local.x() <= m:
+                return HTBOTTOMLEFT
+            if local.y() >= height - m and local.x() >= width - m:
+                return HTBOTTOMRIGHT
+            if local.y() <= m:
+                return HTTOP
+            if local.y() >= height - m:
+                return HTBOTTOM
+            if local.x() <= m:
+                return HTLEFT
+            if local.x() >= width - m:
+                return HTRIGHT
+        # 标题栏空白区域（无子控件处）→ HTCAPTION
+        title_bar = getattr(self, "_title_bar", None)
+        if title_bar is not None and title_bar.isVisible() and 0 <= local.y() < title_bar.height():
+            title_point = title_bar.mapFrom(self, local)
+            if title_bar.childAt(title_point) is None:
+                return HTCAPTION
         return None
 
 

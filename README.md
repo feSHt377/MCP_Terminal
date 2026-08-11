@@ -102,7 +102,7 @@ MCP Terminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用�
 | 工具 | 说明 |
 |------|------|
 | `ssh_connect` | 建立到远程服务器的 SSH 连接（password/key_path 可省略，自动用配置中最近账号；缺失时提示向用户索要凭据） |
-| `ssh_connect_from_config` | 只使用 config.yaml 中已有的服务器配置连接，无需任何凭据 |
+| `ssh_connect_from_config` | 按 config.yaml 中的服务器**别名**精确连接，无需任何凭据（同一 IP 多账号不冲突） |
 | `ssh_disconnect` | 断开指定的 SSH 会话 |
 
 ### 命令执行

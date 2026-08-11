@@ -247,33 +247,37 @@ async def ssh_connect(
 
 
 @mcp.tool()
-async def ssh_connect_from_config(host: str) -> dict[str, Any]:
-    """使用 config.yaml 中已有的服务器配置直接连接，无需任何凭据。
+async def ssh_connect_from_config(name: str) -> dict[str, Any]:
+    """使用 config.yaml 中已有服务器配置的「别名」直接连接，无需任何凭据。
 
-    本工具与 ssh_connect 的区别：本工具只从 config.yaml 读取登录信息，你不需要
-    也不应传入 password / key_path。只要 config.yaml 里配置过该主机，就会自动
-    使用其中最近添加的一个账号（用户名/端口/密码或私钥）登录。
+    本工具与 ssh_connect 的区别：本工具按 config.yaml 中 servers 下的**别名
+    （键名）精确匹配**，直接使用该条配置的 host/user/port/password/key_path，
+    不做任何 IP 猜测。同一 IP 下配置多个账号（如 root/fuzihan）时，用别名
+    连接可以精确指定用哪个账号，避免 IP 冲突。
 
     用法（照做即可）：
-        1. 若之前 list_servers 或已知 config.yaml 里有该主机，直接调用：
-             ssh_connect_from_config(host="1.2.3.4")
-        2. 连接成功后返回 session_id 和 config_account（实际使用的配置账号）。
+        1. 先调用 list_servers 查看配置里的服务器别名，然后：
+             ssh_connect_from_config(name="4090")
+        2. 连接成功后返回 session_id 和 config_account（实际使用的配置别名）。
         3. 若返回 {"status":"error","reason":"config_not_found",...}，说明
-           config.yaml 中没有该主机，请改用 ssh_connect 并向用户询问
+           config.yaml 中没有该别名，请改用 ssh_connect 并向用户询问
            password 或 key_path。
 
     Args:
-        host: 服务器 IP 地址或主机名，必须已在 config.yaml 中配置。
+        name: config.yaml 中 servers 下的服务器别名（键名）。
     """
-    creds = _resolve_server_credentials(host, "root", 22, None, None)
-    if creds is None:
+    from app.config.manager import get_servers
+
+    servers = get_servers()
+    info = servers.get(name)
+    if not isinstance(info, dict) or not info.get("host"):
         message = (
-            f"config.yaml 中没有 {host} 的服务器配置，无法使用本工具连接。"
-            "请改用 ssh_connect，并向用户询问该服务器的 password 或 key_path。"
+            f"config.yaml 中没有名为 {name!r} 的服务器配置（可用 list_servers "
+            "查看全部别名）。请改用 ssh_connect，并向用户询问 password 或 key_path。"
         )
         _log_call(
             "ssh_connect_from_config",
-            {"host": host},
+            {"name": name},
             {"status": "error", "message": message},
         )
         return {
@@ -282,18 +286,21 @@ async def ssh_connect_from_config(host: str) -> dict[str, Any]:
             "reason": "config_not_found",
         }
 
+    host = str(info["host"])
+    user = str(info.get("user") or "root")
+    port = int(info.get("port") or 22)
     result = await _call_gui_async("ssh_connect", {
         "host": host,
-        "user": creds["user"],
-        "port": creds["port"],
-        "password": creds["password"],
-        "key_path": creds["key_path"],
+        "user": user,
+        "port": port,
+        "password": info.get("password"),
+        "key_path": info.get("key_path"),
     })
-    if creds.get("account"):
-        result = {**result, "config_account": creds["account"]}
+    if result.get("status") == "success":
+        result = {**result, "config_account": name}
     _log_call(
         "ssh_connect_from_config",
-        {"host": host},
+        {"name": name, "host": host},
         result,
     )
     return result

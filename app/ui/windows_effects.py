@@ -13,6 +13,7 @@ from ctypes import wintypes
 # ---- WM_NCHITTEST 常量 ----
 WM_NCHITTEST = 0x0084
 HTCLIENT = 1
+HTCAPTION = 2
 HTLEFT = 10
 HTRIGHT = 11
 HTTOP = 12
