@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import deque
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -262,6 +262,7 @@ class TerminalWidget(QWidget):
         self.input.setFrame(False)
         self.input.setPlaceholderText("也可以在上方 Shell 区域直接输入…")
         self.input.returnPressed.connect(self._on_send)
+        self.input.installEventFilter(self)
 
         self.activity = QProgressBar()
         self.activity.setObjectName("activity")
@@ -331,8 +332,26 @@ class TerminalWidget(QWidget):
         self.input.setText(text)
         self.output.replace_input(text)
 
+    def eventFilter(self, obj, event):
+        # 交互模式下，底部输入栏按 Ctrl+C 发送中断信号 \x03 而不是复制。
+        if (
+            obj is self.input
+            and self._interactive_mode
+            and event.type() == QEvent.KeyPress
+            and event.matches(QKeySequence.Copy)
+        ):
+            self._send_raw_input("\x03")
+            return True
+        return super().eventFilter(obj, event)
+
     def _on_send(self) -> None:
         text = self.input.text()
+        if self._interactive_mode:
+            # 交互模式下，底部输入栏作为当前活动进程的输入通道
+            # （可输入 exit 退出，或在下栏按 Ctrl+C 中断）。
+            self.input.clear()
+            self._send_raw_input(text + "\n")
+            return
         if not text.strip():
             self.output.finish_input_line()
             self.output.replace_input("")
@@ -438,8 +457,10 @@ class TerminalWidget(QWidget):
             suffix = "  [Agent]" if source == "Agent" else ""
             self._append_output(f"$ {text}{suffix}\n", theme_current().info if suffix else theme_current().accent)
 
-        self.input.clear()
-        self.input.setEnabled(False)
+        if not self._interactive_mode:
+            # 已处于交互模式时保留底部输入栏（作为活动进程输入通道）。
+            self.input.clear()
+            self.input.setEnabled(False)
         self._busy = True
         self._interactive_busy = self._interactive_mode
         self.activity.setVisible(True)
@@ -493,6 +514,12 @@ class TerminalWidget(QWidget):
             if callback:
                 callback(result)
             self.command_executed.emit(self._session_id or "", command, result)
+            # 交互模式：底部输入栏作为当前进程的输入通道，提示用户如何退出。
+            self.input.setEnabled(bool(self._session_id))
+            self.input.setPlaceholderText(
+                "交互模式：输入并回车发送到当前进程（exit 退出 / Ctrl+C 中断）"
+            )
+            self.prompt_label.setText("交互模式")
             if self._pending_commands:
                 QTimer.singleShot(0, self._run_next)
             else:
@@ -520,16 +547,22 @@ class TerminalWidget(QWidget):
         self._active_command = ""
         if callback:
             callback(result)
-        self.command_executed.emit(command, result)
+        self.command_executed.emit(self._session_id or "", command, result)
 
         if self._pending_commands:
             QTimer.singleShot(0, self._run_next)
         else:
-            self.input.setEnabled(bool(self._session_id))
-            prompt = self._prompt_text()
-            self.output.set_terminal_state(bool(self._session_id), False, prompt)
-            self.output.replace_input("")
-            self.output.setFocus()
+            self._restore_normal_input()
+
+    def _restore_normal_input(self) -> None:
+        """退出忙碌/交互状态后恢复普通输入栏。"""
+        self.input.setEnabled(bool(self._session_id))
+        self.input.setPlaceholderText("也可以在上方 Shell 区域直接输入…")
+        self.prompt_label.setText(self._prompt_text().strip())
+        prompt = self._prompt_text()
+        self.output.set_terminal_state(bool(self._session_id), False, prompt)
+        self.output.replace_input("")
+        self.output.setFocus()
 
     def _on_interactive_finished(self, result: dict) -> None:
         """嵌套 Shell 输入 exit/EOF 后恢复普通命令模式。"""
@@ -547,11 +580,7 @@ class TerminalWidget(QWidget):
         if self._pending_commands:
             QTimer.singleShot(0, self._run_next)
         else:
-            self.input.setEnabled(bool(self._session_id))
-            prompt = self._prompt_text()
-            self.output.set_terminal_state(bool(self._session_id), False, prompt)
-            self.output.replace_input("")
-            self.output.setFocus()
+            self._restore_normal_input()
 
     def _run_next(self) -> None:
         if self._busy and not (self._interactive_mode and not self._interactive_busy):
