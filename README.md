@@ -111,6 +111,7 @@ MCP Terminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用�
 |------|------|
 | `proxy_command` | 在 GUI 当前会话代理执行命令（推荐） |
 | `ssh_exec` | 通过 session_id 在指定会话执行命令 |
+| `cancel_command` | 强制停止当前命令并清空排队中的命令（发送 Ctrl+C / 中断信号） |
 | `autocomplete_command` | 将命令补全到 GUI 输入框，交由用户确认 |
 
 ### 交互式终端

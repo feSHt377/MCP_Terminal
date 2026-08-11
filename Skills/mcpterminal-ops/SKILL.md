@@ -21,6 +21,7 @@ The GUI exposes one current session at a time while the runtime may retain multi
 
 - Prefer `proxy_command` for a normal command that should execute in the current GUI session and appear in its audit trail.
 - Use `ssh_exec` only when an explicit `session_id` is needed. Do not use it to bypass the current GUI session or approval policy.
+- Use `cancel_command` to force-stop a running command and discard queued commands when the user interrupts or you must abandon the current batch.
 - Use `autocomplete_command` when the command should be inserted into the GUI for the user to inspect, edit, and submit.
 - Reserve `terminal_write` and `terminal_read` for genuinely interactive programs. Do not use them for ordinary one-shot shell commands.
 
@@ -59,6 +60,8 @@ Read [references/lxd.md](references/lxd.md) before any LXD remote, image, instan
 ## Align NVIDIA GPU drivers
 
 Read [references/nvidia-gpu-driver.md](references/nvidia-gpu-driver.md) before aligning a container's NVIDIA driver version with the host. When the container reports `Failed to initialize NVML: Driver/library version mismatch`, use its discovery sequence to find the exact package generation and version to upgrade, run the upgrade interactively inside the container so the user can watch, and verify with `nvidia-smi` afterwards.
+
+Read [references/nvidia-secureboot.md](references/nvidia-secureboot.md) when a host under Secure Boot cannot load its NVIDIA driver, e.g. `nvidia-smi` reports `failed to communicate with the NVIDIA driver` and `modprobe nvidia` reports `Key was rejected by service` / `Operation not permitted`. That reference covers the remote-only fix (switch to Ubuntu's prebuilt Canonical-signed modules, remove the DKMS/MOK-signed build, no reboot) and how to tell a MOK-signed module apart from an officially signed one.
 
 ## Report the outcome
 

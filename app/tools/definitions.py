@@ -353,6 +353,23 @@ async def ssh_exec(
     return result
 
 
+@mcp.tool()
+async def cancel_command(session_id: str) -> dict[str, Any]:
+    """强制停止当前正在执行的命令，并清空 Agent 排队中的命令。
+
+    当 ssh_exec/proxy_command 返回 {"status":"queued",...}、命令长时间不返回、
+    或想放弃本轮后续命令时，调用本工具：向远程活动进程发送 Ctrl+C (\x03)
+    中断，同时丢弃队列中尚未执行的命令（其调用方会收到 cancelled 结果）。
+    停止后即可重新 ssh_exec 下发新命令。此操作只影响本会话，不会断开连接。
+
+    Args:
+        session_id: 要停止命令的 SSH 会话 ID（格式: user@host:port）。
+    """
+    result = await _call_gui_async("cancel", {"session_id": session_id})
+    _log_call("cancel_command", {"session_id": session_id}, result)
+    return result
+
+
 # ------------------------------------------------------------------
 # 工具: 交互式终端
 # ------------------------------------------------------------------

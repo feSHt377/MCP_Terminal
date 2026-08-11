@@ -338,6 +338,7 @@ def test_mcp_tools_registration():
         "ssh_connect_from_config",
         "ssh_disconnect",
         "ssh_exec",
+        "cancel_command",
         "terminal_write",
         "terminal_read",
         "upload_file",

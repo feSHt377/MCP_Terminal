@@ -21,6 +21,7 @@ The GUI exposes one current session at a time while the runtime may retain multi
 
 - Prefer `proxy_command` for a normal command that should execute in the current GUI session and appear in its audit trail.
 - Use `ssh_exec` only when an explicit `session_id` is needed. Do not use it to bypass the current GUI session or approval policy.
+- Use `cancel_command` to force-stop a running command and discard queued commands when the user interrupts or you must abandon the current batch.
 - Use `autocomplete_command` when the command should be inserted into the GUI for the user to inspect, edit, and submit.
 - Reserve `terminal_write` and `terminal_read` for genuinely interactive programs. Do not use them for ordinary one-shot shell commands.
 

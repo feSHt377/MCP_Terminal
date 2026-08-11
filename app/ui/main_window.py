@@ -37,9 +37,13 @@ from app.ui.windows_effects import (
     HTBOTTOMLEFT,
     HTBOTTOMRIGHT,
     HTRIGHT,
+    MINMAXINFO,
     RESIZE_MARGIN,
+    WM_GETMINMAXINFO,
+    WM_NCCALCSIZE,
     WM_NCHITTEST,
     apply_window_effects,
+    enable_native_snap,
 )
 
 
@@ -648,6 +652,19 @@ class MainWindow(QMainWindow):
             self.status_panel.log_tool_call(tool_label, dispatch.get("status", "error"))
             return
 
+        if method == "cancel":
+            terminal = self._terminal_for(requested_sid)
+            if terminal is None:
+                request.finish({
+                    "status": "error",
+                    "message": f"会话没有可用的终端标签页: {requested_sid}",
+                })
+                return
+            result = terminal.cancel_command()
+            self.status_panel.log_tool_call("agent:cancel", result.get("status", "error"))
+            request.finish(result)
+            return
+
         manager = SSHManager()
         sid = requested_sid
         if method == "terminal_write":
@@ -885,10 +902,29 @@ class MainWindow(QMainWindow):
         把窗口右侧/下侧大片区域误判为缩放边缘（HTRIGHT/HTBOTTOM 等），
         导致这些区域的控件收不到任何鼠标事件。因此先做 DPI 换算，并对
         内部区域显式返回 HTCLIENT，不再交给 Qt 默认处理。
+
+        另处理 WM_NCCALCSIZE（返回 0 隐藏系统绘制的边框）与
+        WM_GETMINMAXINFO（最大化限制在工作区内），配合 enable_native_snap
+        恢复 Aero Snap 半屏/四分之一吸附手势。
         """
         if sys.platform == "win32" and event_type == b"windows_generic_MSG":
             try:
                 msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_GETMINMAXINFO:
+                    mmi = MINMAXINFO.from_address(msg.lParam)
+                    screen = self.screen() or QGuiApplication.primaryScreen()
+                    if screen is not None:
+                        area = screen.availableGeometry()
+                        mmi.ptMaxPosition.x = area.x()
+                        mmi.ptMaxPosition.y = area.y()
+                        mmi.ptMaxSize.x = area.width()
+                        mmi.ptMaxSize.y = area.height()
+                        mmi.ptMaxTrackSize.x = area.width()
+                        mmi.ptMaxTrackSize.y = area.height()
+                    return True, 0
+                if msg.message == WM_NCCALCSIZE:
+                    # 无边框：客户端区 = 整窗，不预留任何非客户端边框。
+                    return True, 0
                 if msg.message == WM_NCHITTEST:
                     x = ctypes.c_short(msg.lParam & 0xFFFF).value
                     y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
@@ -963,7 +999,10 @@ class MainWindow(QMainWindow):
             try:
                 from app.ui.theme import current as theme_current
 
-                apply_window_effects(int(self.winId()), theme_current().scheme)
+                hwnd = int(self.winId())
+                apply_window_effects(hwnd, theme_current().scheme)
+                # 恢复 WS_THICKFRAME 等样式，启用 Windows 半屏/四分之一吸附。
+                enable_native_snap(hwnd)
             except Exception:
                 pass
         self._sync_maximize_state()

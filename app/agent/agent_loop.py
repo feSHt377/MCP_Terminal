@@ -88,6 +88,11 @@ _SIMPLE_PATTERNS: list[tuple[list[str], str, dict[str, Any]]] = [
         "get_dangerous_commands",
         {},
     ),
+    (
+        ["停止", "取消", "中断", "cancel", "stop", "终止"],
+        "cancel_command",
+        {},
+    ),
 ]
 
 
@@ -227,7 +232,8 @@ async def run_agent(
                     # 自动注入 session_id
                     if func["name"] in ("ssh_exec", "ssh_connect", "ssh_disconnect",
                                         "terminal_write", "terminal_read",
-                                        "upload_file", "download_file"):
+                                        "upload_file", "download_file",
+                                        "cancel_command"):
                         if session_id and "session_id" not in args:
                             args["session_id"] = session_id
 
@@ -270,7 +276,8 @@ async def run_agent(
         # 自动注入 session_id
         if name in ("ssh_exec", "ssh_connect", "ssh_disconnect",
                     "terminal_write", "terminal_read",
-                    "upload_file", "download_file"):
+                    "upload_file", "download_file",
+                    "cancel_command"):
             if session_id and "session_id" not in args:
                 args["session_id"] = session_id
 

@@ -612,9 +612,90 @@ class TerminalWidget(QWidget):
             )
             return
 
+    def _cancel_pending(self, reason: str) -> int:
+        """清空待执行队列，让排队中的命令全部以取消结果返回。返回被取消条数。
+
+        Agent 连续下发的多条命令会排进 ``_pending_commands``。若只中断当前
+        命令而不清空队列，排队的下一条会立即自动执行，看起来就像 Ctrl+C 失效。
+        """
+        count = 0
+        while self._pending_commands:
+            (
+                _text,
+                on_done,
+                _source,
+                _timeout,
+                _sid,
+                _display_echo,
+                _execution_mode,
+            ) = self._pending_commands.popleft()
+            count += 1
+            if on_done:
+                on_done({
+                    "status": "error",
+                    "message": f"命令已取消（{reason}）",
+                    "cancelled": True,
+                })
+        return count
+
+    def cancel_command(self) -> dict:
+        """强制停止当前正在执行的命令并清空 Agent 排队队列。
+
+        MCP ``cancel_command`` 工具的 GUI 入口：向活动进程发送 Ctrl+C (\x03)
+        中断，同时丢弃尚未执行的排队命令（其回调会收到 cancelled 结果）。
+        """
+        sid = self._session_id
+        active = self._active_command or ""
+        queued = len(self._pending_commands)
+
+        if not self._busy and queued == 0:
+            return {
+                "status": "success",
+                "message": "当前没有正在执行的命令或排队命令",
+                "active": "",
+                "cancelled_queued": 0,
+            }
+
+        if self._busy and sid:
+            from app.ssh.bridge import SSHBridge
+            from app.ssh.manager import SSHManager
+
+            def _done(result: dict) -> None:
+                if result.get("status") == "error":
+                    self._append_output(
+                        f"\n⚠ 中断信号发送失败: {result.get('message')}\n",
+                        theme_current().warning,
+                    )
+
+            SSHBridge().submit_realtime(SSHManager().terminal_write(sid, "\x03"), _done)
+
+        cancelled = self._cancel_pending("cancel_command")
+        msg = "⛔ 已发送中断信号"
+        if active:
+            msg += f"，正在停止：{active}"
+        if cancelled:
+            msg += f"，并取消 {cancelled} 条排队命令"
+        self._append_output(f"\n{msg}\n", theme_current().warning)
+
+        return {
+            "status": "success",
+            "message": "已发送中断信号" + (f"，取消 {cancelled} 条排队命令" if cancelled else ""),
+            "active": active,
+            "cancelled_queued": cancelled,
+        }
+
     def _send_raw_input(self, data: str) -> None:
         if not self._session_id or not self._busy:
             return
+        if data == "\x03":
+            # Ctrl+C：中断当前命令的同时清空排队中的 Agent 命令，避免队列
+            # 又自动执行下一条，看起来像 Ctrl+C 被无视。
+            cancelled = self._cancel_pending("Ctrl+C")
+            if cancelled:
+                self._append_output(
+                    f"\n⛔ 已取消 {cancelled} 条排队命令\n",
+                    theme_current().warning,
+                )
         from app.ssh.bridge import SSHBridge
         from app.ssh.manager import SSHManager
 
