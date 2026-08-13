@@ -19,8 +19,9 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
     }
 }
 
-& $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements.txt")
+$PipMirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
+& $VenvPython -m pip install --upgrade pip -i $PipMirror
+& $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements.txt") -i $PipMirror
 & $VenvPython -X utf8 (Join-Path $ProjectRoot "tests\test_core.py")
 
 Write-Host ""
