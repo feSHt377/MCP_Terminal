@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from string import Template
 
@@ -425,6 +427,7 @@ QTabWidget#terminalTabs QTabBar::tab:hover:!selected {
     background: $surface_alt;
 }
 QTabWidget#terminalTabs QTabBar::close-button {
+    image: url("$close_icon");
     margin: 4px;
     border-radius: 4px;
 }
@@ -537,7 +540,38 @@ QPushButton#chatSend:disabled, QPushButton#chatProxy:disabled, QPushButton#chatA
 
 def build_qss(palette: Palette) -> str:
     """基于配色板生成全局 QSS 样式表。"""
-    return _QSS.safe_substitute(vars(palette))
+    return _QSS.safe_substitute(vars(palette), close_icon=_close_icon_url(palette))
+
+
+_CLOSE_ICON_CACHE: dict[str, str] = {}
+
+
+def _close_icon_url(palette: Palette) -> str:
+    """生成（并缓存）一个 X 形关闭图标的 SVG 文件，返回可供 QSS ``url()`` 引用的路径。
+
+    根因：QSS 一旦给 ``QTabBar::close-button`` 设置 background / border-radius 等
+    绘制属性，Qt 就不再绘制默认的关闭 X 图标，必须显式提供 ``image``，否则标签页
+    关闭按钮只剩一个可点击的空白区域。这里用主题色动态生成 SVG，兼顾图标可见与
+    亮 / 暗主题自适应。
+    """
+    scheme = palette.scheme
+    path = _CLOSE_ICON_CACHE.get(scheme)
+    if path is not None and os.path.exists(path):
+        return path
+    color = palette.text_muted
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">'
+        f'<path d="M4.5 4.5 L11.5 11.5 M11.5 4.5 L4.5 11.5" stroke="{color}" '
+        'stroke-width="1.5" stroke-linecap="round" fill="none"/>'
+        "</svg>"
+    )
+    directory = os.path.join(tempfile.gettempdir(), "mcpterminal")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"close-{scheme}.svg")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(svg)
+    _CLOSE_ICON_CACHE[scheme] = path
+    return path.replace("\\", "/")
 
 
 class ThemeManager(QObject):

@@ -25,12 +25,28 @@ _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SHELL_PROMPT_RE = re.compile(
     r"(?:^|[\r\n])(?:[^\r\n]{1,240}[#$]|[^\r\n]{0,220}(?:>>>|\.\.\.|[A-Za-z][\w.-]*>))\s*$"
 )
+# 密码/口令输入提示：sudo / su / passwd / ssh 等，形如
+#   [sudo] password for user: 、Password: 、Current password: 、用户 的密码：
+_PASSWORD_PROMPT_RE = re.compile(
+    r"(?:^|[\r\n])[^\r\n]*(?:password|passwd|密码|密碼)[^\r\n]*[:：]\s*$",
+    re.IGNORECASE,
+)
 
 
 def looks_like_shell_prompt(text: str) -> bool:
     """识别 PTY 输出末尾的普通 Bash/Zsh 风格提示符。"""
     visible = _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", text))
     return bool(_SHELL_PROMPT_RE.search(visible))
+
+
+def looks_like_password_prompt(text: str) -> bool:
+    """识别 PTY 输出末尾的密码输入提示（sudo / su / passwd / ssh 等）。
+
+    这类提示会让进程停在原地等待用户输入，但又不是 shell 提示符，
+    ``auto`` 模式需要把它当作「就绪」切换成交互模式，否则命令会卡到超时。
+    """
+    visible = _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", text))
+    return bool(_PASSWORD_PROMPT_RE.search(visible))
 
 
 def _strip_trailing_prompt(text: str) -> str:
@@ -312,6 +328,7 @@ class SSHManager:
         process: asyncssh.SSHClientProcess | None = None
         output_ready = asyncio.Event()
         detached = False
+        ready_reason: list[str] = []
         session.interactive_out = stdout_parts
         session.interactive_prompt_count = 0
         session.interactive_read_offset = 0
@@ -323,14 +340,17 @@ class SSHManager:
                     break
                 text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
                 target.append(text)
-                prompt_hit = not is_stderr and looks_like_shell_prompt(
-                    "".join(target[-4:])
-                )
+                tail = "".join(target[-4:])
+                prompt_hit = not is_stderr and looks_like_shell_prompt(tail)
+                # 密码提示可能走 stdout 也可能走 stderr（如 sudo），故不区分流。
+                password_hit = looks_like_password_prompt(tail)
                 if prompt_hit and session.active_process is process:
                     session.interactive_prompt_count += 1
                 if interactive is True:
                     output_ready.set()
-                elif interactive is None and prompt_hit:
+                elif interactive is None and (prompt_hit or password_hit):
+                    if password_hit:
+                        ready_reason.append("password")
                     output_ready.set()
                 if on_output is not None:
                     on_output(text, is_stderr)
@@ -404,11 +424,17 @@ class SSHManager:
                         return monitor.result()
                     detached = True
                     session.interactive_ready = True
+                    password_prompt = bool(ready_reason)
                     return {
                         "status": "success",
                         "session_id": session_id,
                         "command": command,
-                        "message": "交互式进程已就绪",
+                        "message": (
+                            "检测到密码提示，已切换为交互模式，请在终端手动输入"
+                            if password_prompt
+                            else "交互式进程已就绪"
+                        ),
+                        "password_prompt": password_prompt,
                         "stdout": "".join(stdout_parts),
                         "stderr": "".join(stderr_parts),
                         "exit_code": None,

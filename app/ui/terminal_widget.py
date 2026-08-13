@@ -517,10 +517,14 @@ class TerminalWidget(QWidget):
             self.command_executed.emit(self._session_id or "", command, result)
             # 交互模式：底部输入栏作为当前进程的输入通道，提示用户如何退出。
             self.input.setEnabled(bool(self._session_id))
-            self.input.setPlaceholderText(
-                "交互模式：输入并回车发送到当前进程（exit 退出 / Ctrl+C 中断）"
-            )
-            self.prompt_label.setText("交互模式")
+            if result.get("password_prompt"):
+                self.input.setPlaceholderText("密码提示：输入密码后回车（Ctrl+C 取消）")
+                self.prompt_label.setText("输入密码")
+            else:
+                self.input.setPlaceholderText(
+                    "交互模式：输入并回车发送到当前进程（exit 退出 / Ctrl+C 中断）"
+                )
+                self.prompt_label.setText("交互模式")
             if self._pending_commands:
                 QTimer.singleShot(0, self._run_next)
             else:

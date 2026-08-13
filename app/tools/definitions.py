@@ -342,6 +342,9 @@ async def ssh_exec(
         timeout: 命令超时秒数，默认 30。
         execution_mode: auto 根据 PTY 运行状态判断；command 必须等待退出码；
             interactive 在进程产生首段输出且仍存活时返回 ready=true。
+            auto 模式遇到密码提示（如 sudo 的 `[sudo] password for user:`）会
+            自动切换为交互模式并返回 ready=true、password_prompt=true，此时
+            应提示用户在终端手动输入密码。
     """
     result = await _call_gui_async("ssh_exec", {
         "session_id": session_id,
@@ -498,6 +501,8 @@ async def proxy_command(
     execution_mode 可为 auto、command 或 interactive。对任意已知会长期等待输入的
     程序使用 interactive；返回 interactive=true、ready=true 且没有 exit_code 属于
     正常状态，后续输入应改用 terminal_write。auto 会依据 PTY 提示符和进程生命周期判断。
+    auto 模式遇到密码提示（如 sudo 的 `[sudo] password for user:`）会自动切换为
+    交互模式并返回 ready=true、password_prompt=true，此时应提示用户在终端手动输入密码。
     """
     result = await _call_gui_async("proxy_command", {
         "command": command,

@@ -4,4 +4,4 @@
 raw.githubusercontent.com 读取本文件对比版本。
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
