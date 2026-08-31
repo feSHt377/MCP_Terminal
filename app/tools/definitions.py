@@ -30,7 +30,7 @@ mcp = FastMCP("mcpterminal")
 # 日志
 # ------------------------------------------------------------------
 
-LOG_DIR = "logs"
+LOG_DIR = str(Path(__file__).resolve().parent.parent / "logs")
 HISTORY_FILE = os.path.join(LOG_DIR, "tool_call_history.json")
 
 
