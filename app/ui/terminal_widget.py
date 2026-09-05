@@ -25,10 +25,156 @@ _ANSI_ESCAPE_RE = re.compile(
     r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\))|(?:\x1B[@-_][0-?]*[ -/]*[@-~])"
 )
 
+# 标准 16 色：0-7 普通，8-15 亮色（xterm 调色板）
+_ANSI_16 = [
+    "#000000", "#c23621", "#25bc24", "#d3b113", "#2e6da4", "#8e44ad", "#1ab0c4", "#c5c8c6",
+    "#666666", "#e74c3c", "#2ecc40", "#ffdc00", "#3498db", "#9b59b6", "#1abc9c", "#ffffff",
+]
+_ANSI_256_CACHE: dict[int, QColor] = {}
+
+
+def _ansi_256(idx: int) -> QColor:
+    """将 xterm 256 色索引映射为 RGB（带缓存）。"""
+    cached = _ANSI_256_CACHE.get(idx)
+    if cached is not None:
+        return cached
+    if idx < 16:
+        color = QColor(_ANSI_16[idx])
+    elif idx < 232:
+        idx -= 16
+        r = (idx // 36) * 51
+        g = ((idx // 6) % 6) * 51
+        b = (idx % 6) * 51
+        color = QColor(r, g, b)
+    else:
+        v = 8 + (idx - 232) * 10
+        color = QColor(v, v, v)
+    _ANSI_256_CACHE[idx] = color
+    return color
+
 
 def strip_terminal_control(text: str) -> str:
     """Remove ANSI/OSC control sequences while preserving CR progress updates."""
     return _ANSI_ESCAPE_RE.sub("", text).replace("\x00", "")
+
+
+def _apply_sgr(params: list[str], current: QTextCharFormat, base: QTextCharFormat) -> QTextCharFormat:
+    """根据 SGR 参数更新字符格式（相对状态机）。
+
+    ``base`` 为无 ANSI 时的默认格式（通常是传入的主题色），``\\x1b[0m`` 会回到它。
+    """
+    fmt = QTextCharFormat(current)
+    if not params:
+        params = ["0"]
+    p = 0
+    while p < len(params):
+        raw = params[p]
+        code = int(raw) if raw != "" else 0
+        if code == 0:
+            fmt = QTextCharFormat(base)
+        elif code == 1:
+            fmt.setFontWeight(QFont.Bold)
+        elif code == 2:
+            fmt.setFontWeight(QFont.Light)
+        elif code == 3:
+            fmt.setFontItalic(True)
+        elif code == 4:
+            fmt.setFontUnderline(True)
+        elif code == 9:
+            fmt.setFontStrikeOut(True)
+        elif code == 22:
+            fmt.setFontWeight(QFont.Normal)
+        elif code == 23:
+            fmt.setFontItalic(False)
+        elif code == 24:
+            fmt.setFontUnderline(False)
+        elif code == 29:
+            fmt.setFontStrikeOut(False)
+        elif 30 <= code <= 37:
+            fmt.setForeground(QColor(_ANSI_16[code - 30]))
+        elif code == 38:
+            if p + 2 < len(params) and params[p + 1] == "5":
+                fmt.setForeground(_ansi_256(int(params[p + 2])))
+                p += 2
+            elif p + 4 < len(params) and params[p + 1] == "2":
+                fmt.setForeground(QColor(int(params[p + 2]), int(params[p + 3]), int(params[p + 4])))
+                p += 4
+        elif code == 39:
+            fmt.setForeground(base.foreground())
+        elif 40 <= code <= 47:
+            fmt.setBackground(QColor(_ANSI_16[code - 40]))
+        elif code == 48:
+            if p + 2 < len(params) and params[p + 1] == "5":
+                fmt.setBackground(_ansi_256(int(params[p + 2])))
+                p += 2
+            elif p + 4 < len(params) and params[p + 1] == "2":
+                fmt.setBackground(QColor(int(params[p + 2]), int(params[p + 3]), int(params[p + 4])))
+                p += 4
+        elif code == 49:
+            fmt.setBackground(QColor())
+        elif 90 <= code <= 97:
+            fmt.setForeground(QColor(_ANSI_16[code - 90 + 8]))
+        elif 100 <= code <= 107:
+            fmt.setBackground(QColor(_ANSI_16[code - 100 + 8]))
+        p += 1
+    return fmt
+
+
+def _iter_ansi_segments(text: str, base: QTextCharFormat):
+    """把含 ANSI 的文本切成 (纯文本段, 对应 QTextCharFormat) 序列。
+
+    - SGR（\\x1b[..m）序列被解析为格式变化；
+    - 其他控制序列（光标移动、清屏、OSC 标题、NUL）被忽略；
+    - 普通字符按当前格式产出。
+    """
+    n = len(text)
+    i = 0
+    buf: list[str] = []
+    current = QTextCharFormat(base)
+    while i < n:
+        c = text[i]
+        if c == "\x00":
+            i += 1
+            continue
+        if c == "\x1b":
+            if buf:
+                yield "".join(buf), current
+                buf = []
+            if i + 1 < n and text[i + 1] == "[":
+                j = i + 2
+                params: list[str] = []
+                cur = ""
+                while j < n and text[j] in "0123456789;":
+                    if text[j] == ";":
+                        params.append(cur)
+                        cur = ""
+                    else:
+                        cur += text[j]
+                    j += 1
+                if cur:
+                    params.append(cur)
+                final = text[j] if j < n else ""
+                j += 1
+                if final == "m":
+                    current = _apply_sgr(params, current, base)
+                i = j
+            elif i + 1 < n and text[i + 1] == "]":
+                j = i + 2
+                while j < n and text[j] != "\x07":
+                    if text[j] == "\x1b" and j + 1 < n and text[j + 1] == "\\":
+                        j += 2
+                        break
+                    j += 1
+                else:
+                    j += 1
+                i = j
+            else:
+                i += 2
+        else:
+            buf.append(c)
+            i += 1
+    if buf:
+        yield "".join(buf), current
 
 
 class TerminalSurface(QPlainTextEdit):
@@ -727,20 +873,22 @@ class TerminalWidget(QWidget):
         saved_input = self.output.detach_input_line()
         cursor = self.output.textCursor()
         cursor.movePosition(QTextCursor.End)
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color))
+        base_fmt = QTextCharFormat()
+        base_fmt.setForeground(QColor(color))
 
-        clean = strip_terminal_control(text).replace("\r\n", "\n")
-        for char in clean:
-            if dynamic and char == "\r":
-                cursor.movePosition(QTextCursor.StartOfBlock)
-                cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
-                cursor.removeSelectedText()
-                cursor.movePosition(QTextCursor.End)
-            elif dynamic and char == "\b":
-                cursor.deletePreviousChar()
-            else:
-                cursor.insertText(char, fmt)
+        # 解析 ANSI 颜色/样式序列，按段用对应格式渲染；无 ANSI 时回落到主题色。
+        for chunk, fmt in _iter_ansi_segments(text, base_fmt):
+            clean = chunk.replace("\r\n", "\n")
+            for char in clean:
+                if dynamic and char == "\r":
+                    cursor.movePosition(QTextCursor.StartOfBlock)
+                    cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                    cursor.removeSelectedText()
+                    cursor.movePosition(QTextCursor.End)
+                elif dynamic and char == "\b":
+                    cursor.deletePreviousChar()
+                else:
+                    cursor.insertText(char, fmt)
 
         self.output.setTextCursor(cursor)
         self.output.ensureCursorVisible()
