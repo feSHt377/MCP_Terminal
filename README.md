@@ -114,6 +114,12 @@ MCP Terminal 暴露以下标准化工具，AI Agent 可通过 MCP 协议调用�
 | `cancel_command` | 强制停止当前命令并清空排队中的命令（发送 Ctrl+C / 中断信号） |
 | `autocomplete_command` | 将命令补全到 GUI 输入框，交由用户确认 |
 
+> **聚合命令校验**：`proxy_command` / `ssh_exec` 拒绝高聚合命令——多行命令、heredoc（`<<`）、
+> 以及含 2 个及以上连接符（`;` `&&` `||`）的命令链会返回
+> `{"status":"error","reason":"aggregated_command"}`，引导 Agent 拆成多次单命令调用，
+> 保证用户能在终端逐步看到执行过程。管道（`a | b`）、单命令后台（`cmd &`）和
+> `cd <目录> && <命令>` 形式不受影响；多行脚本请用 `upload_file` 上传后单行执行。
+
 ### 交互式终端
 
 | 工具 | 说明 |

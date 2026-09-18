@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.tools.command_guard import check_agent_command
 from app.ui.theme import current as theme_current
 
 
@@ -540,6 +541,25 @@ class TerminalWidget(QWidget):
             if on_done:
                 on_done(result)
             return result
+
+        # Agent 命令在 GUI 侧再拦一次：即使旧版 MCP server 未带校验，
+        # 高聚合命令也会在这里被拒绝，错误结果原样回传给 Agent。
+        if source == "Agent":
+            guard = check_agent_command(text)
+            if guard is not None:
+                result = {
+                    "status": "error",
+                    "reason": guard["reason"],
+                    "issues": guard["issues"],
+                    "message": guard["message"],
+                }
+                self._append_output(
+                    "⚠ Agent 聚合命令被拒绝：多行/heredoc/多连接符命令链需要拆分执行（详见返回结果）\n",
+                    theme_current().warning,
+                )
+                if on_done:
+                    on_done(result)
+                return result
 
         if self._busy:
             if source != "Agent":

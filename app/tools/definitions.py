@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 from app.config.manager import add_server as _add_server, get_servers, get_security_config, remove_server as _remove_server
 from app.ipc import call_gui, gui_is_running
 from app.ssh.manager import SSHManager
+from app.tools.command_guard import check_agent_command
 
 # ------------------------------------------------------------------
 # MCP 实例
@@ -333,6 +334,11 @@ async def ssh_exec(
 
     一次只提交一条命令，等待并分析本次结果后再决定下一步；不要并行提交多个
     探测命令，也不要在未读取错误信息前用猜测的参数反复重试。
+    禁止把多条命令聚合提交：多行命令、heredoc（<<）、以及含 2 个及以上连接符
+    （; && ||）的命令链会被直接拒绝（reason=aggregated_command）——聚合命令会让
+    用户在终端上看不到每一步的执行过程。至多允许 1 个连接符（如
+    cd <目录> && <命令>）；需要跑多行脚本时先用 upload_file 上传脚本文件，
+    再单行执行。管道（a | b）和单命令后台（cmd &）不受限制。
     适合执行一次性命令，如 nvidia-smi、docker ps、ls 等；交互程序可将
     execution_mode 设为 interactive，进入后使用 terminal_write 继续输入。
 
@@ -346,6 +352,17 @@ async def ssh_exec(
             自动切换为交互模式并返回 ready=true、password_prompt=true，此时
             应提示用户在终端手动输入密码。
     """
+    guard = check_agent_command(command)
+    if guard is not None:
+        result = {
+            "status": "error",
+            "reason": guard["reason"],
+            "issues": guard["issues"],
+            "message": guard["message"],
+        }
+        _log_call("ssh_exec", {"session_id": session_id, "command": command}, result)
+        return result
+
     result = await _call_gui_async("ssh_exec", {
         "session_id": session_id,
         "command": command,
@@ -498,12 +515,28 @@ async def proxy_command(
 
     必须等待本次结果并根据 stdout/stderr 决定下一步。不要并行调用本工具，也不要
     在尚未分析错误原因时连续尝试多个相似命令。并发到达的少量命令会被串行排队。
+    禁止把多条命令聚合提交：多行命令、heredoc（<<）、以及含 2 个及以上连接符
+    （; && ||）的命令链会被直接拒绝（reason=aggregated_command）——聚合命令会让
+    用户在终端上看不到每一步的执行过程。至多允许 1 个连接符（如
+    cd <目录> && <命令>）；需要跑多行脚本时先用 upload_file 上传脚本文件，
+    再单行执行。管道（a | b）和单命令后台（cmd &）不受限制。
     execution_mode 可为 auto、command 或 interactive。对任意已知会长期等待输入的
     程序使用 interactive；返回 interactive=true、ready=true 且没有 exit_code 属于
     正常状态，后续输入应改用 terminal_write。auto 会依据 PTY 提示符和进程生命周期判断。
     auto 模式遇到密码提示（如 sudo 的 `[sudo] password for user:`）会自动切换为
     交互模式并返回 ready=true、password_prompt=true，此时应提示用户在终端手动输入密码。
     """
+    guard = check_agent_command(command)
+    if guard is not None:
+        result = {
+            "status": "error",
+            "reason": guard["reason"],
+            "issues": guard["issues"],
+            "message": guard["message"],
+        }
+        _log_call("proxy_command", {"command": command}, result)
+        return result
+
     result = await _call_gui_async("proxy_command", {
         "command": command,
         "timeout": timeout,

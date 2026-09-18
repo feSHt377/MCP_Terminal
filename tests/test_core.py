@@ -401,9 +401,11 @@ def test_mcp_tools_sync_call():
     print("  ✅ ssh_connect 凭据解析（自动取配置账号 / 缺失时提示索要）")
 
     # list_sessions
+    # 注意：本机 GUI 可能正在运行并持有活跃会话，count 取决于环境，
+    # 只校验结构合法性，不断言具体数量。
     r = list_sessions()
     assert r["status"] == "success"
-    assert r["count"] == 0
+    assert isinstance(r.get("count"), int) and r["count"] >= 0
     print(f"  ✅ list_sessions() → {r['count']} 个活跃会话")
 
     # get_dangerous_commands

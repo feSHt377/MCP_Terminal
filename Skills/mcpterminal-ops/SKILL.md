@@ -1,6 +1,6 @@
 ---
 name: mcpterminal-ops
-description: Safely inspect, diagnose, and operate Linux servers through the mcpterminal MCP tools, including SSH session selection, command execution, human approval, and LXD workflows. Use when Codex must connect to or switch an mcpterminal SSH session, run remote Linux or LXD commands, troubleshoot a failed command, or decide whether to execute a command or leave it in the GUI for human confirmation.
+description: Safely inspect, diagnose, and operate Linux servers through the mcpterminal MCP tools, including SSH session selection, command execution, human approval, and LXD workflows. Use when the agent (Codex, OpenCode, or any MCP client with the mcpterminal server) must connect to or switch an mcpterminal SSH session, run remote Linux or LXD commands, troubleshoot a failed command, or decide whether to execute a command or leave it in the GUI for human confirmation.
 ---
 
 # MCP Terminal Operations
@@ -32,7 +32,20 @@ Use autocomplete rather than immediate execution when an action deletes data, ov
 1. Send exactly one complete remote command.
 2. Wait for that command's completed structured result, including status, stdout, stderr, and exit code.
 3. Interpret the result before choosing another command.
-4. Run the next command only when it follows from observed evidence.
+4. Run the next command only if it follows from observed evidence.
+
+### One command per call — no aggregation
+
+Never aggregate multiple shell commands into one execution. `ssh_exec` and `proxy_command` enforce this and return `{"status": "error", "reason": "aggregated_command"}` when the command contains:
+
+- a newline anywhere (multi-line commands), including heredocs (`<<`);
+- two or more chain connectors (`;`, `&&`, `||`, or a mid-command `&`).
+
+At most one connector is allowed, reserved for forms like `cd <dir> && <command>` (each execution runs in a fresh process, so `cd` never persists across calls). Pipes (`a | b`) and single-command backgrounding (`cmd &`) are not aggregation and remain allowed.
+
+When a call is rejected with `aggregated_command`, do not reformat and retry the same blob. Split it into successive single-command calls, waiting for each structured result before the next, so the user can watch every step in the GUI terminal.
+
+To run a multi-line script (Python, shell, etc.), upload it with `upload_file` first, then execute it as a single-line command. Never inline heredocs or multi-line programs into `command`.
 
 Never invoke multiple execution tools concurrently against the current GUI session. Never append speculative fragments, submit a command character by character, or issue several guessed variants while a previous command may still be active.
 
