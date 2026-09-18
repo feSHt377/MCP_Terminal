@@ -380,11 +380,18 @@ class MainWindow(QMainWindow):
             terminal = TerminalWidget()
             terminal.command_executed.connect(self._on_command_executed)
             terminal.set_session(session_id, user, host, cwd)
+            # 必须先登记映射再 addTab：往空 QTabWidget 添加首个标签页会同步触发
+            # currentChanged → _on_tab_changed，而该回调靠 _tab_widgets 反查 session_id。
+            # 若登记晚于 addTab，首个会话会被解析成 None，导致 _session_id 保持 None，
+            # 进而使依赖「当前会话」的 proxy_command 报「GUI 当前没有 SSH 会话」。
+            self._tab_widgets[session_id] = terminal
             index = self._tabs.addTab(terminal, f"{user}@{host}")
             self._tabs.setTabToolTip(index, session_id)
-            self._tab_widgets[session_id] = terminal
         if switch:
             self._tabs.setCurrentWidget(terminal)
+            # 不依赖 currentChanged 是否触发（复用已有标签页时不会触发），显式同步，
+            # 保证 ssh_connect 之后「当前会话」始终有效。
+            self._on_tab_changed(self._tabs.currentIndex())
         else:
             # 后台打开的标签页不抢焦点，把焦点还给当前可见的终端。
             current = self._current_terminal()
