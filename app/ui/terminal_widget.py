@@ -209,10 +209,21 @@ class TerminalSurface(QPlainTextEdit):
         if self._input_anchor is None:
             return None
         saved = self._input_buffer
+        expected_len = len(self._prompt) + len(saved)
         cursor = self.textCursor()
-        cursor.setPosition(self._input_anchor)
-        cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
-        cursor.removeSelectedText()
+        cursor.movePosition(QTextCursor.End)
+        # 用相对长度选择末尾输入行，防止 maximumBlockCount 丢弃旧行导致绝对 _input_anchor 错位
+        cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, expected_len)
+        selected = cursor.selectedText()
+        # 兼容 Qt 在换行位置使用的 Unicode 段落分隔符 U+2029
+        if "\u2029" not in selected and "\n" not in selected:
+            cursor.removeSelectedText()
+        elif cursor.position() != self._input_anchor and self._input_anchor < self.document().characterCount():
+            # 回退：如果末尾没有换行，且绝对 anchor 在安全范围内
+            cursor.setPosition(self._input_anchor)
+            cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+            if "\u2029" not in cursor.selectedText() and "\n" not in cursor.selectedText():
+                cursor.removeSelectedText()
         self.setTextCursor(cursor)
         self._input_anchor = None
         return saved
@@ -372,6 +383,10 @@ class TerminalWidget(QWidget):
         self._result_callback = None
         self._active_command = ""
         self._pending_commands = deque()
+        self._stream_buffer: deque[tuple[str, bool]] = deque()
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(25)  # 40 FPS 定时批处理输出流，防止高频信号卡死 UI
+        self._flush_timer.timeout.connect(self._flush_stream_buffer)
         self._setup_ui()
         self.stream_received.connect(self._on_stream_received)
         self.interactive_finished.connect(self._on_interactive_finished)
@@ -667,9 +682,42 @@ class TerminalWidget(QWidget):
         SSHBridge().submit_async(_exec(), self._on_result)
 
     def _on_stream_received(self, text: str, is_stderr: bool) -> None:
-        self._append_output(text, theme_current().danger if is_stderr else theme_current().text, dynamic=True)
+        self._stream_buffer.append((text, is_stderr))
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_stream_buffer(self) -> None:
+        if not self._stream_buffer:
+            self._flush_timer.stop()
+            return
+        # 聚合同一类型的连续文本段进行批量写入
+        items = list(self._stream_buffer)
+        self._stream_buffer.clear()
+        self._flush_timer.stop()
+        
+        current_text = []
+        current_is_stderr = None
+        for text, is_stderr in items:
+            if current_is_stderr is None or current_is_stderr == is_stderr:
+                current_text.append(text)
+                current_is_stderr = is_stderr
+            else:
+                self._append_output(
+                    "".join(current_text),
+                    theme_current().danger if current_is_stderr else theme_current().text,
+                    dynamic=True,
+                )
+                current_text = [text]
+                current_is_stderr = is_stderr
+        if current_text and current_is_stderr is not None:
+            self._append_output(
+                "".join(current_text),
+                theme_current().danger if current_is_stderr else theme_current().text,
+                dynamic=True,
+            )
 
     def _on_result(self, result: dict) -> None:
+        self._flush_stream_buffer()
         if result.get("interactive") and result.get("ready"):
             self._interactive_mode = True
             self._interactive_busy = False
@@ -899,16 +947,36 @@ class TerminalWidget(QWidget):
         # 解析 ANSI 颜色/样式序列，按段用对应格式渲染；无 ANSI 时回落到主题色。
         for chunk, fmt in _iter_ansi_segments(text, base_fmt):
             clean = chunk.replace("\r\n", "\n")
-            for char in clean:
-                if dynamic and char == "\r":
+            if not dynamic or ("\r" not in clean and "\b" not in clean):
+                cursor.insertText(clean, fmt)
+                continue
+
+            # 处理含 \r 或 \b 的动态控制符，整块累积文本批量插入
+            buf: list[str] = []
+            i = 0
+            n = len(clean)
+            while i < n:
+                char = clean[i]
+                if char == "\r":
+                    if buf:
+                        cursor.insertText("".join(buf), fmt)
+                        buf = []
                     cursor.movePosition(QTextCursor.StartOfBlock)
                     cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
                     cursor.removeSelectedText()
                     cursor.movePosition(QTextCursor.End)
-                elif dynamic and char == "\b":
+                    i += 1
+                elif char == "\b":
+                    if buf:
+                        cursor.insertText("".join(buf), fmt)
+                        buf = []
                     cursor.deletePreviousChar()
+                    i += 1
                 else:
-                    cursor.insertText(char, fmt)
+                    buf.append(char)
+                    i += 1
+            if buf:
+                cursor.insertText("".join(buf), fmt)
 
         self.output.setTextCursor(cursor)
         self.output.ensureCursorVisible()

@@ -69,10 +69,17 @@ class SSHBridge(QThread):
                     try:
                         result = await coro
                         self.result_ready.emit(task_id, result)
+                    except asyncio.CancelledError:
+                        self.result_ready.emit(
+                            task_id, {"status": "error", "message": "任务已取消 (CancelledError)", "cancelled": True}
+                        )
                     except Exception as e:
                         self.result_ready.emit(
                             task_id, {"status": "error", "message": str(e)}
                         )
+                except asyncio.CancelledError:
+                    # 避免外层 worker 循环被意外 cancel 导致整个 bridge 线程退出
+                    continue
                 except Exception as e:
                     self.error_occurred.emit(str(e))
 

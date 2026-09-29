@@ -23,7 +23,7 @@ logger = logging.getLogger("mcpterminal.ssh")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SHELL_PROMPT_RE = re.compile(
-    r"(?:^|[\r\n])(?:[^\r\n]{1,240}[#$]|[^\r\n]{0,220}(?:>>>|\.\.\.|[A-Za-z][\w.-]*>))\s*$"
+    r"(?:^|[\r\n])(?:[\w.-]+@[\w.-]+[:\w/~.-]*[#$]|\([-\w.]+\)\s*[\w.-]+@[\w.-]+[:\w/~.-]*[#$]|(?:root|admin|ubuntu|debian|centos|user|bash|sh)[^\r\n]{0,80}[#$]|[\w.-]+:[~/\w.-]+[#$]|(?:>>>|\.\.\.|[A-Za-z][\w.-]{1,30}>))\s*$"
 )
 # 密码/口令输入提示：sudo / su / passwd / ssh 等，形如
 #   [sudo] password for user: 、Password: 、Current password: 、用户 的密码：

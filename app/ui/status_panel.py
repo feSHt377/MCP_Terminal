@@ -33,6 +33,7 @@ class StatusPanel(QWidget):
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setFrameStyle(QFrame.NoFrame)
+        self.log_view.setMaximumBlockCount(3000)
         self.log_view.setFont(QFont("Consolas, monospace", 9))
         layout.addWidget(self.log_view, stretch=1)
 
