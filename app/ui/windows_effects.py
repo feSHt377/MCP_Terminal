@@ -121,6 +121,59 @@ def apply_window_effects(hwnd: int, scheme: str = "dark") -> bool:
     return applied
 
 
+def screen_to_client_logical(
+    hwnd: int,
+    screen_x: int,
+    screen_y: int,
+    logical_width: int,
+    logical_height: int,
+):
+    """把 ``WM_NCHITTEST`` 的物理屏幕坐标换算为客户区内的 Qt 逻辑坐标。
+
+    Windows 的消息用**物理像素**，Qt 的控件几何用**逻辑像素**，而两者之间
+    不能简单地「除以窗口的 devicePixelRatio」：Qt 的逻辑全局坐标系在高 DPI /
+    多显示器下并非物理坐标的等比缩放——每块屏幕的逻辑原点与该屏物理原点不成
+    比例（例如本机副屏物理原点 -1920、逻辑原点也是 -1920，而物理原点/1.25 是
+    -1536）。窗口被拖到另一块不同分辨率的屏幕后，按 dpr 直接换算会把窗口内的
+    点算到别处，命中测试于是把窗口中部误判成缩放边缘（或把标题栏算成 HTTOP），
+    Windows 就不再向控件投递点击、也不再返回 HTCAPTION，表现为「组件点不动、
+    窗口拖不动」。
+
+    这里改为两步换算：先用 ``ScreenToClient`` 得到**物理客户区坐标**，再按窗口
+    自身的「逻辑客户区尺寸 / 物理客户区尺寸」比例折算。该比例对窗口所在屏幕
+    总是成立（窗口必然整体位于单块屏上），因此不受多屏逻辑坐标系的影响。
+
+    Returns:
+        ``(x, y)`` 逻辑客户区坐标；平台不支持或换算失败时返回 ``None``。
+    """
+    if sys.platform != "win32" or not hwnd:
+        return None
+    if logical_width <= 0 or logical_height <= 0:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        handle = wintypes.HWND(hwnd)
+
+        pt = wintypes.POINT(int(screen_x), int(screen_y))
+        if not user32.ScreenToClient(handle, ctypes.byref(pt)):
+            return None
+
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(handle, ctypes.byref(rect)):
+            return None
+        phys_width = rect.right - rect.left
+        phys_height = rect.bottom - rect.top
+        if phys_width <= 0 or phys_height <= 0:
+            return None
+
+        return (
+            (pt.x - rect.left) * logical_width / phys_width,
+            (pt.y - rect.top) * logical_height / phys_height,
+        )
+    except Exception:
+        return None
+
+
 def enable_native_snap(hwnd: int) -> bool:
     """恢复无边框窗口的 Windows 原生吸附/缩放手势。
 

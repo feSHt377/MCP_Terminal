@@ -44,6 +44,7 @@ from app.ui.windows_effects import (
     WM_NCHITTEST,
     apply_window_effects,
     enable_native_snap,
+    screen_to_client_logical,
 )
 
 
@@ -904,11 +905,11 @@ class MainWindow(QMainWindow):
     def nativeEvent(self, event_type, message):
         """拦截 WM_NCHITTEST，让无边框窗口支持边缘缩放。
 
-        WM_NCHITTEST 的 lParam 是物理像素坐标，而 Qt 的 mapFromGlobal /
-        默认命中测试按逻辑像素解释。高分屏（dpr>1）下直接用物理坐标会
-        把窗口右侧/下侧大片区域误判为缩放边缘（HTRIGHT/HTBOTTOM 等），
-        导致这些区域的控件收不到任何鼠标事件。因此先做 DPI 换算，并对
-        内部区域显式返回 HTCLIENT，不再交给 Qt 默认处理。
+        WM_NCHITTEST 的 lParam 是**物理像素**屏幕坐标，而 Qt 的控件几何是
+        **逻辑像素**。两者的换算不能靠 devicePixelRatio，否则窗口移到另一块
+        分辨率/缩放不同的屏幕后命中区域会整体偏移（详见 _hit_test 与
+        windows_effects.screen_to_client_logical）。因此这里统一按窗口客户区的
+        物理/逻辑比例换算，并对内部区域显式返回 HTCLIENT。
 
         另处理 WM_NCCALCSIZE（返回 0 隐藏系统绘制的边框）与
         WM_GETMINMAXINFO（最大化限制在工作区内），配合 enable_native_snap
@@ -948,15 +949,29 @@ class MainWindow(QMainWindow):
     def _hit_test(self, x: int, y: int):
         """WM_NCHITTEST 处理：边缘缩放 + 标题栏空白区返回 HTCAPTION。
 
-        x/y 为物理像素坐标，需先换算成逻辑坐标再与逻辑尺寸比较。
+        x/y 是 WM_NCHITTEST 给出的**物理屏幕坐标**。这里用
+        :func:`screen_to_client_logical` 换算成窗口内的 Qt 逻辑坐标，再与逻辑
+        尺寸比较——不能改用「除以 devicePixelRatio + mapFromGlobal」：Qt 的逻辑
+        全局坐标系在多屏高 DPI 下并非物理坐标的等比缩放，窗口移到另一块分辨率的
+        屏幕后按 dpr 换算会整体偏移，把窗口中部误判成缩放边缘、把标题栏算成
+        HTTOP，于是控件点不动、窗口也拖不动。详见该函数的说明。
+
         标题栏空白区返回 HTCAPTION 以恢复 Windows 原生窗口手势：
         拖动移动/半屏吸附/四分之一分屏、双击最大化、最大化后拖下还原。
         按钮/菜单/应用名所在处返回 HTCLIENT，保证点击仍交给控件。
         """
         if not self.isVisible():
             return None
-        dpr = self.devicePixelRatio() or 1.0
-        local = self.mapFromGlobal(QPoint(round(x / dpr), round(y / dpr)))
+
+        logical = screen_to_client_logical(
+            int(self.winId()), x, y, self.width(), self.height()
+        )
+        if logical is None:
+            # 换算失败（拿不到窗口句柄/客户区）时宁可放弃边缘缩放，直接当客户区
+            # 处理也绝不能猜一个坐标——猜错就会把点击当成拖拽缩放吞掉。
+            return None
+        local = QPoint(round(logical[0]), round(logical[1]))
+
         width, height = self.width(), self.height()
         m = RESIZE_MARGIN
         if not self.isMaximized():
