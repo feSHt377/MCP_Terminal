@@ -3,6 +3,7 @@
 默认启动 GUI。--mcp 以 MCP stdio 模式运行。
 """
 
+import faulthandler
 import sys
 from pathlib import Path
 
@@ -10,9 +11,31 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+_CRASH_LOG = _project_root / ".runtime" / "crash.log"
+_crash_file = None
+
+
+def _enable_crash_log() -> None:
+    """把致命崩溃的 Python 栈写入 .runtime/crash.log。
+
+    GUI 曾多次以 Qt fail-fast（异常码 0xc0000409，模块 Qt6Core.dll）静默退出，
+    没有日志就无法定位。faulthandler 能在进程被 abort 时留下栈回溯。
+    """
+    global _crash_file
+    try:
+        _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        _crash_file = open(_CRASH_LOG, "a", encoding="utf-8", buffering=1)
+        import datetime as _dt
+
+        _crash_file.write(f"\n=== mcpterminal start {_dt.datetime.now().isoformat()} ===\n")
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except Exception:
+        pass
+
 
 def run_gui():
     """启动 PySide6 GUI。"""
+    _enable_crash_log()
     from app.ipc import GuiInstanceLock, call_gui, gui_is_running
 
     # 锁覆盖 GUI 尚未写出 IPC 状态文件的启动窗口，消除并发启动竞态。

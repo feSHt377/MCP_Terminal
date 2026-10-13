@@ -346,17 +346,23 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"正在连接 {user}@{host}:{port}…")
         self.server_panel.connect_btn.setEnabled(False)
 
-        self._bridge.submit_async(
+        # 走并行通道：即使某个会话正在跑长命令，点击连接也不会排队卡死
+        self._bridge.submit_parallel(
             _connect(),
-            lambda r: self._on_connected(r, user, host),
+            lambda r: self._on_connected_cli(r, user, host),
         )
 
-    def _on_connected(self, result: dict, user: str, host: str):
+    def _on_connected_cli(self, result: dict, user: str, host: str):
+        """人工点击连接的收尾：无论成败都要恢复按钮，避免"点了没反应"。"""
+        self.server_panel.connect_btn.setEnabled(True)
+        self._on_connected(result, user, host)
+
+    def _on_connected(self, result: dict, user: str, host: str, switch: bool = True):
         if result["status"] == "success":
             sid = result["session_id"]
             display_host = result.get("remote_hostname") or host
             current_dir = result.get("current_dir") or "~"
-            self._open_session_tab(sid, user, display_host, current_dir)
+            self._open_session_tab(sid, user, display_host, current_dir, switch=switch)
             self.server_panel.set_connected(sid, sid)
             self.status_panel.log_connect(sid, host)
             self.status_bar.showMessage(f"已连接: {sid}")
@@ -442,7 +448,8 @@ class MainWindow(QMainWindow):
         async def _disconnect():
             return await manager.disconnect(session_id)
 
-        self._bridge.submit_async(
+        # 并行通道：断开不应排在长命令后面
+        self._bridge.submit_parallel(
             _disconnect(),
             lambda r: self._on_disconnected(r, session_id),
         )
@@ -613,7 +620,7 @@ class MainWindow(QMainWindow):
                     password=params.get("password"), key_path=params.get("key_path"),
                 )
 
-            self._bridge.submit_async(
+            self._bridge.submit_parallel(
                 _connect(),
                 lambda result: self._finish_ipc_connect(request, result, user, host),
             )
@@ -625,7 +632,7 @@ class MainWindow(QMainWindow):
                 request.finish({"status": "error", "message": "没有可断开的 SSH 会话"})
                 return
             manager = SSHManager()
-            self._bridge.submit_async(
+            self._bridge.submit_parallel(
                 manager.disconnect(requested_sid),
                 lambda result: self._finish_ipc_disconnect(request, result, requested_sid),
             )
@@ -668,7 +675,9 @@ class MainWindow(QMainWindow):
                     "message": f"会话没有可用的终端标签页: {requested_sid}",
                 })
                 return
-            result = terminal.cancel_command()
+            # 显式传 requested_sid，避免 TerminalWidget 用自己绑定的 sid 时
+            # 与 IPC 请求目标不一致（防御性：_terminal_for 已按 requested_sid 取回）
+            result = terminal.cancel_command(session_id=requested_sid)
             self.status_panel.log_tool_call("agent:cancel", result.get("status", "error"))
             request.finish(result)
             return
@@ -698,7 +707,9 @@ class MainWindow(QMainWindow):
             self._bridge.submit_async(coro, callback)
 
     def _finish_ipc_connect(self, request, result, user, host):
-        self._on_connected(result, user, host)
+        # Agent 触发的连接：后台打开标签页，不抢用户正在看的终端，
+        # 也不改 MainWindow._session_id（避免多 Agent 并发时 proxy_command 落点漂移）。
+        self._on_connected(result, user, host, switch=False)
         request.finish(result)
 
     def _finish_ipc_disconnect(self, request, result, sid):

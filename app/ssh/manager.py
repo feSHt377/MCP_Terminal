@@ -20,6 +20,13 @@ import asyncssh
 
 logger = logging.getLogger("mcpterminal.ssh")
 
+# 所有可能永久挂起的 await 都必须有上限：SSHBridge 的 worker 是严格串行的，
+# 任何一个无超时的 await 卡住都会让后续全部请求排队到死（表现为"点连接无限卡死"）。
+# TCP 建连（黑洞网络会一直重传 SYN）、打开 shell channel、读取身份信息，都要限时。
+CONNECT_TIMEOUT = 15.0
+CHANNEL_TIMEOUT = 15.0
+SFTP_TIMEOUT = 1800.0
+
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _SHELL_PROMPT_RE = re.compile(
@@ -157,7 +164,13 @@ class SSHManager:
 
         try:
             # 准备认证参数
-            connect_kwargs: dict[str, Any] = {"port": port, "known_hosts": None}
+            connect_kwargs: dict[str, Any] = {
+                "port": port,
+                "known_hosts": None,
+                # 关键：不让 TCP 建连无限重传。对端不在线（如 Tailscale 节点消失）
+                # 时，没有这个上限就会卡到 OS 默认超时甚至更久。
+                "connect_timeout": CONNECT_TIMEOUT,
+            }
             if key_path:
                 key_path = os.path.expanduser(key_path)
                 connect_kwargs["client_keys"] = [key_path]
@@ -172,20 +185,26 @@ class SSHManager:
 
             conn = await asyncssh.connect(host, username=user, **connect_kwargs)
 
-            # 打开交互式 shell（PTY）
-            shell = await conn.create_process(
-                term_type="xterm-256color",
-                term_size=(80, 24),
+            # 打开交互式 shell（PTY）——同样限时，避免 channel 协商卡死 worker
+            shell = await asyncio.wait_for(
+                conn.create_process(
+                    term_type="xterm-256color",
+                    term_size=(80, 24),
+                ),
+                timeout=CHANNEL_TIMEOUT,
             )
 
             # 获取真实远程提示符信息，GUI 不再用连接 IP 冒充主机名。
             remote_hostname = host
             current_dir = "~"
             try:
-                identity = await conn.run(
-                    "printf '%s\\n%s\\n%s\\n' \"$(hostname)\" \"$HOME\" \"$PWD\"",
-                    encoding="utf-8",
-                    check=False,
+                identity = await asyncio.wait_for(
+                    conn.run(
+                        "printf '%s\\n%s\\n%s\\n' \"$(hostname)\" \"$HOME\" \"$PWD\"",
+                        encoding="utf-8",
+                        check=False,
+                    ),
+                    timeout=CHANNEL_TIMEOUT,
                 )
                 identity_lines = (identity.stdout or "").splitlines()
                 if identity_lines and identity_lines[0].strip():
@@ -194,7 +213,8 @@ class SSHManager:
                     home = identity_lines[1].strip()
                     pwd = identity_lines[2].strip()
                     current_dir = "~" if home and pwd == home else pwd
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
+                # 身份信息拿不到不影响连接本身，退回连接参数
                 logger.debug("无法读取远程提示符信息，使用连接参数", exc_info=True)
 
             session = SSHSession(
@@ -218,6 +238,16 @@ class SSHManager:
                 "current_dir": current_dir,
             }
 
+        except asyncio.TimeoutError:
+            logger.error("SSH 连接超时 %s", session_id)
+            return {
+                "status": "error",
+                "session_id": session_id,
+                "message": (
+                    f"连接超时（{CONNECT_TIMEOUT:g}s）：{host}:{port} 不可达。"
+                    "请确认目标主机在线、网络/VPN（如 Tailscale）已连接。"
+                ),
+            }
         except asyncssh.Error as e:
             logger.error("SSH 连接失败 %s: %s", session_id, e)
             return {"status": "error", "session_id": session_id, "message": str(e)}
@@ -233,7 +263,17 @@ class SSHManager:
 
         try:
             if session.active_process is not None:
-                session.active_process.terminate()
+                try:
+                    session.active_process.terminate()
+                    # 给进程一个响应 SIGTERM 的窗口，不阻塞 disconnect 本身
+                    await asyncio.wait_for(
+                        session.active_process.wait_closed(), timeout=2.0
+                    )
+                except (asyncio.TimeoutError, OSError):
+                    try:
+                        session.active_process.kill()
+                    except Exception:
+                        pass
                 session.active_process = None
             session.interactive_ready = False
             if session.shell is not None:
@@ -356,20 +396,49 @@ class SSHManager:
                     on_output(text, is_stderr)
 
         try:
-            process = await session.conn.create_process(
-                command,
-                encoding="utf-8",
-                term_type="xterm-256color",
-                term_size=(120, 36),
+            # 打开命令 channel 也要限时：channel 协商卡住会让串行 worker 永久占死
+            process = await asyncio.wait_for(
+                session.conn.create_process(
+                    command,
+                    encoding="utf-8",
+                    term_type="xterm-256color",
+                    term_size=(120, 36),
+                ),
+                timeout=max(CHANNEL_TIMEOUT, float(timeout) if timeout else CHANNEL_TIMEOUT),
             )
             session.active_process = process
 
             async def _run() -> None:
-                await asyncio.gather(
-                    _pump(process.stdout, stdout_parts, False),
-                    _pump(process.stderr, stderr_parts, True),
-                )
-                await process.wait_closed()
+                pump_tasks = [
+                    asyncio.create_task(_pump(process.stdout, stdout_parts, False)),
+                    asyncio.create_task(_pump(process.stderr, stderr_parts, True)),
+                ]
+                try:
+                    # 先等进程退出，而不是先等 pump EOF。
+                    # 旧逻辑「先 gather(pump) 再 wait_closed」会永久卡死：
+                    # 远程命令 fork 的子进程继承 stdout/stderr 后，主进程退出
+                    # 但 SSH channel 不关闭，pump 的 stream.read 永远等不到 EOF，
+                    # gather 取消不了卡在不可中断 read 上的 pump，worker 被僵尸协程占死。
+                    await process.wait_closed()
+                finally:
+                    # 进程已退出：给 pump 一个短窗口读残余输出，然后强制取消。
+                    # cancel() 对卡在 stream.read 上的协程通常有效（CancelledError
+                    # 会注入到 await 点），但个别 asyncssh 版本的 read 不可中断。
+                    # 因此这里一律用带超时的 wait，绝不用无上限的 gather——
+                    # 否则一旦 pump 无法取消，worker 又会被僵尸协程永久占死。
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*pump_tasks, return_exceptions=True),
+                            timeout=2.0,
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    for task in pump_tasks:
+                        if not task.done():
+                            task.cancel()
+                    # 关键：带超时等待，超时即放弃这些 pump 继续往下走
+                    if any(not task.done() for task in pump_tasks):
+                        await asyncio.wait(pump_tasks, timeout=2.0)
 
             def _completed_result() -> dict[str, Any]:
                 return {
@@ -610,6 +679,46 @@ class SSHManager:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    async def interrupt_process(self, session_id: str) -> dict[str, Any]:
+        """中断指定会话的活动进程（SIGTERM → 3s 未退 → SIGKILL）。
+
+        非交互进程（``create_process`` 启动）的 stdin 不经过 PTY 行规程，
+        写入 ``\\x03`` 只是普通输入字符，无法产生 SIGINT——这就是旧版
+        ``cancel_command`` 对 ``sleep 300`` 类命令失效的根因。必须用
+        ``process.terminate()`` / ``process.kill()`` 直接发信号。
+
+        没有活动进程时（交互式 shell 在等输入），fallback 到 ``\\x03``，
+        此时 PTY 行规程会把它转成 SIGINT 发给前台进程组，依然有效。
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return {"status": "error", "message": f"会话不存在: {session_id}"}
+
+        proc = session.active_process
+        if proc is None:
+            # 无活动进程：交互式 shell 在等输入，\x03 经 PTY 行规程转 SIGINT。
+            return await self.terminal_write(session_id, "\x03")
+
+        session.touch()
+        try:
+            proc.terminate()  # SIGTERM
+            try:
+                await asyncio.wait_for(proc.wait_closed(), timeout=3.0)
+                return {
+                    "status": "success",
+                    "message": "进程已响应 SIGTERM 退出",
+                    "signal": "TERM",
+                }
+            except asyncio.TimeoutError:
+                proc.kill()  # SIGKILL
+                return {
+                    "status": "success",
+                    "message": "SIGTERM 未生效，已升级为 SIGKILL",
+                    "signal": "KILL",
+                }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     async def terminal_read(
         self, session_id: str, size: int = 4096, timeout: float = 2.0
     ) -> dict[str, Any]:
@@ -680,7 +789,7 @@ class SSHManager:
         session.touch()
         try:
             async with session.conn.start_sftp_client() as sftp:
-                await sftp.put(local_path, remote_path)
+                await asyncio.wait_for(sftp.put(local_path, remote_path), timeout=SFTP_TIMEOUT)
             logger.info("[%s] 上传: %s → %s", session_id, local_path, remote_path)
             return {
                 "status": "success",
@@ -688,6 +797,8 @@ class SSHManager:
                 "local": local_path,
                 "remote": remote_path,
             }
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": f"上传超时 ({SFTP_TIMEOUT:g}s): {local_path} → {remote_path}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -708,7 +819,7 @@ class SSHManager:
         session.touch()
         try:
             async with session.conn.start_sftp_client() as sftp:
-                await sftp.get(remote_path, local_path)
+                await asyncio.wait_for(sftp.get(remote_path, local_path), timeout=SFTP_TIMEOUT)
             logger.info("[%s] 下载: %s → %s", session_id, remote_path, local_path)
             return {
                 "status": "success",
@@ -716,6 +827,8 @@ class SSHManager:
                 "remote": remote_path,
                 "local": local_path,
             }
+        except asyncio.TimeoutError:
+            return {"status": "error", "message": f"下载超时 ({SFTP_TIMEOUT:g}s): {remote_path} → {local_path}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 

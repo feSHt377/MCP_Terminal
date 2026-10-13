@@ -510,8 +510,9 @@ async def proxy_command(
     command: str,
     timeout: float = 30.0,
     execution_mode: Literal["auto", "command", "interactive"] = "auto",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    """在 GUI 当前会话代理执行一条命令，并把过程显示在人工终端。
+    """在 GUI 当前会话（或指定会话）代理执行一条命令，并把过程显示在人工终端。
 
     必须等待本次结果并根据 stdout/stderr 决定下一步。不要并行调用本工具，也不要
     在尚未分析错误原因时连续尝试多个相似命令。并发到达的少量命令会被串行排队。
@@ -525,6 +526,11 @@ async def proxy_command(
     正常状态，后续输入应改用 terminal_write。auto 会依据 PTY 提示符和进程生命周期判断。
     auto 模式遇到密码提示（如 sudo 的 `[sudo] password for user:`）会自动切换为
     交互模式并返回 ready=true、password_prompt=true，此时应提示用户在终端手动输入密码。
+
+    Args:
+        session_id: 目标 SSH 会话 ID。不传时自动锁定 GUI 当前会话——
+            多 Agent 并发时必须传，否则「当前会话」可能被其他 Agent 切换，
+            导致命令落到错误的连接上。
     """
     guard = check_agent_command(command)
     if guard is not None:
@@ -534,15 +540,25 @@ async def proxy_command(
             "issues": guard["issues"],
             "message": guard["message"],
         }
-        _log_call("proxy_command", {"command": command}, result)
+        _log_call("proxy_command", {"command": command, "session_id": session_id}, result)
         return result
 
-    result = await _call_gui_async("proxy_command", {
+    params: dict[str, Any] = {
         "command": command,
         "timeout": timeout,
         "execution_mode": execution_mode,
-    })
-    _log_call("proxy_command", {"command": command}, result)
+    }
+    if session_id:
+        params["session_id"] = session_id
+    else:
+        # 锁定当前会话：发命令前先 ping 一次把 session_id 固定下来，
+        # 防止命令在 IPC 排队期间被另一个 Agent 的 select_session 改掉。
+        ping = await _call_gui_async("ping", {})
+        if ping.get("status") == "success" and ping.get("session_id"):
+            params["session_id"] = ping["session_id"]
+
+    result = await _call_gui_async("proxy_command", params)
+    _log_call("proxy_command", {"command": command, "session_id": params.get("session_id")}, result)
     return result
 
 

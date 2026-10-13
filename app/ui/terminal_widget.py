@@ -679,7 +679,19 @@ class TerminalWidget(QWidget):
                 on_exit=_interactive_exit,
             )
 
-        SSHBridge().submit_async(_exec(), self._on_result)
+        try:
+            SSHBridge().submit_async(_exec(), self._on_result)
+        except Exception as exc:
+            # bridge 未启动/已停止等异常：必须重置 _busy，否则队列永久卡死
+            self._busy = False
+            self._interactive_busy = False
+            self.activity.setVisible(False)
+            prompt = self._prompt_text()
+            self.output.set_terminal_state(bool(self._session_id), False, prompt)
+            result = {"status": "error", "message": f"命令提交失败: {exc}"}
+            if on_done:
+                on_done(result)
+            self._restore_normal_input()
 
     def _on_stream_received(self, text: str, is_stderr: bool) -> None:
         self._stream_buffer.append((text, is_stderr))
@@ -856,13 +868,15 @@ class TerminalWidget(QWidget):
                 })
         return count
 
-    def cancel_command(self) -> dict:
+    def cancel_command(self, session_id: str | None = None) -> dict:
         """强制停止当前正在执行的命令并清空 Agent 排队队列。
 
-        MCP ``cancel_command`` 工具的 GUI 入口：向活动进程发送 Ctrl+C (\x03)
-        中断，同时丢弃尚未执行的排队命令（其回调会收到 cancelled 结果）。
+        MCP ``cancel_command`` 工具的 GUI 入口：对非交互进程用
+        ``SIGTERM → SIGKILL`` 升级中断（``\\x03`` 写入 stdin 无效），
+        对交互式 shell fallback 到 ``\\x03``；同时丢弃尚未执行的排队命令
+        （其回调会收到 cancelled 结果）。
         """
-        sid = self._session_id
+        sid = session_id or self._session_id
         active = self._active_command or ""
         queued = len(self._pending_commands)
 
@@ -885,7 +899,7 @@ class TerminalWidget(QWidget):
                         theme_current().warning,
                     )
 
-            SSHBridge().submit_realtime(SSHManager().terminal_write(sid, "\x03"), _done)
+            SSHBridge().submit_realtime(SSHManager().interrupt_process(sid), _done)
 
         cancelled = self._cancel_pending("cancel_command")
         msg = "⛔ 已发送中断信号"
@@ -914,6 +928,18 @@ class TerminalWidget(QWidget):
                     f"\n⛔ 已取消 {cancelled} 条排队命令\n",
                     theme_current().warning,
                 )
+            # 非交互进程写 \x03 到 stdin 无效，必须用 signal 中断
+            from app.ssh.bridge import SSHBridge
+            from app.ssh.manager import SSHManager
+
+            sid = self._session_id
+
+            def _int_done(result: dict) -> None:
+                if result.get("status") == "error":
+                    self._append_output(f"\n⚠ 中断失败: {result.get('message')}\n", theme_current().warning)
+
+            SSHBridge().submit_realtime(SSHManager().interrupt_process(sid), _int_done)
+            return
         from app.ssh.bridge import SSHBridge
         from app.ssh.manager import SSHManager
 

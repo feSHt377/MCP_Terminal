@@ -86,42 +86,77 @@ class SSHBridge(QThread):
         try:
             loop.run_until_complete(_worker())
         finally:
+            # 标记不可用：否则 submit_* 会继续把任务塞进没人消费的队列，
+            # 调用方永远等不到回调（表现为"无限卡死"且没有任何报错）。
+            self._ready = False
             # 清理待处理任务
             running = asyncio.all_tasks(loop)
             for task in running:
                 task.cancel()
             loop.run_until_complete(asyncio.gather(*running, return_exceptions=True))
             loop.close()
+            self._loop = None
 
     def stop(self):
         """停止事件循环线程。"""
         self._task_queue.put((-1, None, None))  # 停止信号
         self.wait(3000)
+        self._ready = False
+
+    def is_ready(self) -> bool:
+        """事件循环是否可用（线程已退出则为 False）。"""
+        return bool(self._ready) and self._loop is not None and not self._loop.is_closed()
 
     def _wait_ready(self):
         """阻塞等待事件循环就绪。"""
         import time
         deadline = time.time() + 5
-        while not self._ready and time.time() < deadline:
+        while not self.is_ready() and time.time() < deadline:
             time.sleep(0.01)
-        if not self._ready:
-            raise RuntimeError("SSHBridge 事件循环未在 5s 内就绪")
+        if not self.is_ready():
+            raise RuntimeError("SSHBridge 事件循环不可用（未启动或已停止）")
+
+    @staticmethod
+    def _close_coro(coro) -> None:
+        """丢弃未执行的协程，避免 'coroutine was never awaited' 警告。"""
+        try:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
 
     def submit(self, coro) -> dict[str, Any]:
         """同步提交协程并等待结果（仅用于 closeEvent 等同步场景）。
 
         通过 run_coroutine_threadsafe 在 bridge 的事件循环中执行。
         """
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except RuntimeError as exc:
+            self._close_coro(coro)
+            return {"status": "error", "message": str(exc)}
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=30)
+        try:
+            return future.result(timeout=30)
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
 
     def submit_async(self, coro, on_done):
         """异步提交协程，通过回调接收结果。（GUI 线程安全）
 
         on_done 签名为: def on_done(result: dict) -> None
+
+        事件循环不可用时也会调用 on_done 并回传错误结果——绝不静默丢弃，
+        否则调用方（如 GUI IPC 请求）会永远等不到回调而"无限卡死"。
         """
-        self._wait_ready()
+        try:
+            self._wait_ready()
+        except RuntimeError as exc:
+            self._close_coro(coro)
+            on_done({"status": "error", "message": str(exc)})
+            return
+
         task_id = str(self._counter)
         self._counter += 1
 
@@ -134,14 +169,21 @@ class SSHBridge(QThread):
         self.result_ready.connect(_handler)
         self._task_queue.put((task_id, coro, on_done))
 
-    def submit_realtime(self, coro, on_done):
-        """在同一事件循环立即调度短操作，不等待串行命令队列。
+    def submit_parallel(self, coro, on_done):
+        """在同一事件循环并行调度，**不排入串行命令队列**。
 
-        仅用于向已经运行的交互进程写入键盘数据等不会新建远程命令的操作。
-        普通命令必须继续使用 ``submit_async``，以保留严格的串行执行语义。
+        用于不触碰活动进程的操作——新建连接、断开连接等。这类操作与「某会话
+        正在跑一条长命令」互不冲突，若排在串行队列后面，一条 3600s 的命令就能
+        让"点击连接"排队到 IPC 超时，表现为无限卡死。
         """
-        self._wait_ready()
-        task_id = f"realtime-{self._counter}"
+        try:
+            self._wait_ready()
+        except RuntimeError as exc:
+            self._close_coro(coro)
+            on_done({"status": "error", "message": str(exc)})
+            return
+
+        task_id = f"parallel-{self._counter}"
         self._counter += 1
 
         def _handler(tid, result):
@@ -149,7 +191,7 @@ class SSHBridge(QThread):
                 self.result_ready.disconnect(_handler)
                 on_done(result)
 
-        async def _run_realtime():
+        async def _run_parallel():
             try:
                 result = await coro
             except Exception as exc:
@@ -157,4 +199,11 @@ class SSHBridge(QThread):
             self.result_ready.emit(task_id, result)
 
         self.result_ready.connect(_handler)
-        asyncio.run_coroutine_threadsafe(_run_realtime(), self._loop)
+        asyncio.run_coroutine_threadsafe(_run_parallel(), self._loop)
+
+    def submit_realtime(self, coro, on_done):
+        """向已运行的交互进程写入键盘数据等短操作（不排串行队列）。
+
+        普通命令必须继续使用 ``submit_async``，以保留严格的串行执行语义。
+        """
+        self.submit_parallel(coro, on_done)
