@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Force Python UTF-8 mode globally to prevent Windows CP936/GBK UnicodeDecodeError
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+
 # 1. Lock working directory to project root
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $ProjectRoot
@@ -100,10 +104,10 @@ if ($PipMirror) {
 }
 
 Write-Host "Installing/verifying dependencies..." -ForegroundColor Cyan
-& $VenvPython -m pip install @PipArgs -r (Join-Path $ProjectRoot 'requirements.txt')
+& $VenvPython -X utf8 -m pip install @PipArgs -r (Join-Path $ProjectRoot 'requirements.txt')
 if ($LASTEXITCODE -ne 0 -and $PipMirror) {
     Write-Warning "Installation with mirror failed. Falling back to default PyPI index..."
-    & $VenvPython -m pip install --timeout 30 --retries 2 -r (Join-Path $ProjectRoot 'requirements.txt')
+    & $VenvPython -X utf8 -m pip install --timeout 30 --retries 2 -r (Join-Path $ProjectRoot 'requirements.txt')
 }
 
 if ($LASTEXITCODE -ne 0) {
